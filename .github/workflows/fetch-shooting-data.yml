@@ -9,6 +9,9 @@ on:
 jobs:
   fetch-data:
     runs-on: [self-hosted, windows]
+    defaults:
+      run:
+        shell: pwsh
 
     permissions:
       contents: write

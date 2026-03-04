@@ -24,7 +24,7 @@ const path  = require('path');
 
 
 
-function fetchUrl(targetUrl, timeoutMs = 20000) {
+function fetchUrl(targetUrl, timeoutMs = 20000, _maxRedirects = 10) {
 
   return new Promise((resolve, reject) => {
 
@@ -52,13 +52,15 @@ function fetchUrl(targetUrl, timeoutMs = 20000) {
 
       if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
 
+        if (_maxRedirects <= 0) return reject(new Error('Too many redirects'));
+
         const redirect = res.headers.location.startsWith('http')
 
           ? res.headers.location
 
           : parsed.origin + res.headers.location;
 
-        return fetchUrl(redirect, timeoutMs).then(resolve).catch(reject);
+        return fetchUrl(redirect, timeoutMs, _maxRedirects - 1).then(resolve).catch(reject);
 
       }
 
@@ -82,6 +84,80 @@ function fetchUrl(targetUrl, timeoutMs = 20000) {
 
 }
 
+
+
+// ─── Claude Vision API helper ─────────────────────────────────────────────────
+
+async function callClaudeVision(base64Data, mediaType, prompt, { model = 'claude-haiku-4-5-20251001', maxTokens = 256 } = {}) {
+  const isDocument = mediaType === 'application/pdf';
+  const content = [
+    isDocument
+      ? { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64Data } }
+      : { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } },
+    { type: 'text', text: prompt }
+  ];
+  const body = JSON.stringify({ model, max_tokens: maxTokens, messages: [{ role: 'user', content }] });
+  const data = await new Promise((resolve, reject) => {
+    const req = require('https').request({
+      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Length': Buffer.byteLength(body)
+      }
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch(e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+  // Error handling: check for API errors, rate limits, etc.
+  if (data.type === 'error' || data.error) {
+    const msg = data.error?.message || JSON.stringify(data.error || data);
+    throw new Error('Claude API error: ' + msg);
+  }
+  return (data.content?.[0]?.text || '').trim();
+}
+
+
+// ─── Power BI wait helper ─────────────────────────────────────────────────────
+
+async function waitForPowerBI(page, fallbackMs = 10000) {
+  // Try to wait for Power BI visual containers to render, then short safety wait
+  try {
+    await page.waitForSelector('.visual-container, .visualContainer, [class*="visual"]', { timeout: 30000 });
+    await page.waitForTimeout(Math.min(fallbackMs, 5000));
+  } catch {
+    // Selector not found — fall back to fixed wait
+    await page.waitForTimeout(fallbackMs);
+  }
+}
+
+
+// ─── CSV parsing ──────────────────────────────────────────────────────────────
+
+function parseCsvLine(line) {
+  const cols = [];
+  let cur = '', inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuote) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQuote = false;
+      else cur += ch;
+    } else {
+      if (ch === '"') inQuote = true;
+      else if (ch === ',') { cols.push(cur.trim()); cur = ''; }
+      else cur += ch;
+    }
+  }
+  cols.push(cur.trim());
+  return cols;
+}
 
 
 // ─── PDF parsing ──────────────────────────────────────────────────────────────
@@ -367,88 +443,16 @@ async function fetchDurham() {
 
 
   // Send to Claude vision API
-
-  const claudeData = await new Promise((resolve, reject) => {
-
-    const body = JSON.stringify({
-
-      model: 'claude-haiku-4-5-20251001',
-
-      max_tokens: 256,
-
-      messages: [{
-
-        role: 'user',
-
-        content: [
-
-          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf } },
-
-          { type: 'text', text: 'This is a Durham Police Department shooting data chart. Look at the "Non-Fatal" bar group on the right side. What are the exact numbers shown above the three bars for 2024, 2025, and 2026? Reply with ONLY: 2024=N 2025=N 2026=N' }
-
-        ]
-
-      }]
-
-    });
-
-    const req = require('https').request({
-
-      hostname: 'api.anthropic.com',
-
-      path: '/v1/messages',
-
-      method: 'POST',
-
-      headers: {
-
-        'Content-Type': 'application/json',
-
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-        'anthropic-version': '2023-06-01',
-
-        'Content-Length': Buffer.byteLength(body)
-
-      }
-
-    }, (res) => {
-
-      const chunks = [];
-
-      res.on('data', c => chunks.push(c));
-
-      res.on('end', () => {
-
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-
-        catch(e) { reject(e); }
-
-      });
-
-    });
-
-    req.on('error', reject);
-
-    req.write(body);
-
-    req.end();
-
-  });
-
-
-
-  const responseText = claudeData.content?.[0]?.text || '';
+  const responseText = await callClaudeVision(base64Pdf, 'application/pdf',
+    'This is a Durham Police Department shooting data chart. Look at the "Non-Fatal" bar group on the right side. What are the exact numbers shown above the three bars for 2024, 2025, and 2026? Reply with ONLY: 2024=N 2025=N 2026=N');
 
   console.log('Durham vision response:', responseText);
-
-
 
   const m2025 = responseText.match(/2025=(\d+)/);
 
   const m2026 = responseText.match(/2026=(\d+)/);
 
-  if (!m2026) throw new Error('Could not parse Durham chart values. Response: ' + responseText + ' API resp: ' + JSON.stringify(claudeData).substring(0,200));
+  if (!m2026) throw new Error('Could not parse Durham chart values. Response: ' + responseText);
 
 
 
@@ -548,79 +552,8 @@ async function fetchMilwaukee() {
 
   const base64Image = screenshotBuf.toString('base64');
 
-
-
-  const claudeData = await new Promise((resolve, reject) => {
-
-    const body = JSON.stringify({
-
-      model: 'claude-haiku-4-5-20251001',
-
-      max_tokens: 256,
-
-      messages: [{
-
-        role: 'user',
-
-        content: [
-
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
-
-          { type: 'text', text: 'This is a Milwaukee Police Department crime dashboard. Find the row labeled "Non-Fatal Shooting" in the table. It has columns for YTD 2024, YTD 2025, and YTD 2026. What are those three YTD numbers? Reply with ONLY: YTD2024=N YTD2025=N YTD2026=N' }
-
-        ]
-
-      }]
-
-    });
-
-    const req = require('https').request({
-
-      hostname: 'api.anthropic.com',
-
-      path: '/v1/messages',
-
-      method: 'POST',
-
-      headers: {
-
-        'Content-Type': 'application/json',
-
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-        'anthropic-version': '2023-06-01',
-
-        'Content-Length': Buffer.byteLength(body)
-
-      }
-
-    }, (res) => {
-
-      const chunks = [];
-
-      res.on('data', c => chunks.push(c));
-
-      res.on('end', () => {
-
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
-
-        catch(e) { reject(e); }
-
-      });
-
-    });
-
-    req.on('error', reject);
-
-    req.write(body);
-
-    req.end();
-
-  });
-
-
-
-  const responseText = claudeData.content?.[0]?.text || '';
+  const responseText = await callClaudeVision(base64Image, 'image/png',
+    'This is a Milwaukee Police Department crime dashboard. Find the row labeled "Non-Fatal Shooting" in the table. It has columns for YTD 2024, YTD 2025, and YTD 2026. What are those three YTD numbers? Reply with ONLY: YTD2024=N YTD2025=N YTD2026=N');
 
   console.log('Milwaukee vision response:', responseText);
 
@@ -774,9 +707,9 @@ async function fetchMemphis() {
 
 
 
-  var ytdMatch = chartText.match(new RegExp(yr + ':\\s*(\\d+?)(?=\\d{4}:|\\s|\\(|$)'));
+  var ytdMatch = chartText.match(new RegExp(yr + ':\\s*(\\d+)(?=\\s|\\(|$)'));
 
-  var priorMatch = chartText.match(new RegExp((yr-1) + ':\\s*(\\d+?)(?=\\d{4}:|\\s|\\(|$)'));
+  var priorMatch = chartText.match(new RegExp((yr-1) + ':\\s*(\\d+)(?=\\s|\\(|$)'));
 
   if (ytdMatch) {
 
@@ -812,53 +745,9 @@ async function fetchMemphis() {
 
     const base64Image = screenshotBuf.toString('base64');
 
-    const claudeData = await new Promise((resolve, reject) => {
-
-      const body = JSON.stringify({
-
-        model: 'claude-haiku-4-5-20251001',
-
-        max_tokens: 64,
-
-        messages: [{
-
-          role: 'user',
-
-          content: [
-
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
-
-            { type: 'text', text: 'This is a Memphis Non-Fatal Shooting Incidents bar chart. The chart title area shows "YEAR: COUNT" for the current and prior year. What are the two values? Reply ONLY in this format: YTD=N PRIOR=N (where YTD is the current/latest year count and PRIOR is the previous year count)' }
-
-          ]
-
-        }]
-
-      });
-
-      const req = require('https').request({
-
-        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-                   'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body) }
-
-      }, (res) => {
-
-        const chunks = []; res.on('data', c => chunks.push(c));
-
-        res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch(e) { reject(e); } });
-
-      });
-
-      req.on('error', reject); req.write(body); req.end();
-
-    });
-
-
-
-    const visionText = (claudeData.content?.[0]?.text || '').trim();
+    const visionText = await callClaudeVision(base64Image, 'image/png',
+      'This is a Memphis Non-Fatal Shooting Incidents bar chart. The chart title area shows "YEAR: COUNT" for the current and prior year. What are the two values? Reply ONLY in this format: YTD=N PRIOR=N (where YTD is the current/latest year count and PRIOR is the previous year count)',
+      { maxTokens: 64 });
 
     console.log('Memphis vision response:', visionText);
 
@@ -916,9 +805,7 @@ async function fetchPittsburgh() {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  await page.waitForTimeout(20000);
-
-
+  await waitForPowerBI(page, 15000);
 
   const page1Text = await page.evaluate(() => document.body.innerText);
 
@@ -981,8 +868,6 @@ async function fetchPittsburgh() {
 
 
   const pageText = await page.evaluate(() => document.body.innerText);
-
-  await browser.close();
 
   await browser.close();
 
@@ -1332,21 +1217,28 @@ async function fetchBuffalo() {
 
 
 
-  const janCurr  = 'Jan-' + String(yr).slice(2);
+  // Build month suffixes for current and prior year (Jan-26, Feb-26, ...)
+  const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const currSuffix = '-' + String(yr).slice(2);
+  const priorSuffix = '-' + String(yr - 1).slice(2);
+  const currMonths = new Set(monthNames.map(m => m + currSuffix));
+  const priorMonths = new Set(monthNames.map(m => m + priorSuffix));
 
-  const janPrior = 'Jan-' + String(yr - 1).slice(2);
 
 
+  let victimsYtd = 0, victimsPrior = 0;
 
-  let victimsYtd = null, victimsPrior = null;
+  let killedYtd  = 0, killedPrior  = 0;
 
-  let killedYtd  = null, killedPrior  = null;
+  let latestMonth = null;
+
+  let foundAnyCurr = false;
 
 
 
   const rows = csvText.split('\n').map(function(l) { return l.replace(/\r/g, '').trim(); }).filter(Boolean);
 
-  console.log('Buffalo: total rows:', rows.length, '| janCurr:', janCurr, '| janPrior:', janPrior);
+  console.log('Buffalo: total rows:', rows.length);
 
 
 
@@ -1374,19 +1266,23 @@ async function fetchBuffalo() {
 
 
 
-    if (month === janCurr) {
+    if (currMonths.has(month)) {
 
-      if (isVictims && victimsYtd === null)  victimsYtd = count;
+      foundAnyCurr = true;
 
-      if (isKilled  && killedYtd  === null)  killedYtd  = count;
+      if (isVictims) victimsYtd += count;
+
+      if (isKilled)  killedYtd  += count;
+
+      latestMonth = month;
 
     }
 
-    if (month === janPrior) {
+    if (priorMonths.has(month)) {
 
-      if (isVictims && victimsPrior === null) victimsPrior = count;
+      if (isVictims) victimsPrior += count;
 
-      if (isKilled  && killedPrior  === null) killedPrior  = count;
+      if (isKilled)  killedPrior  += count;
 
     }
 
@@ -1394,29 +1290,39 @@ async function fetchBuffalo() {
 
 
 
-  console.log('Buffalo parsed: victimsYtd=' + victimsYtd + ' killedYtd=' + killedYtd + ' victimsPrior=' + victimsPrior + ' killedPrior=' + killedPrior);
+  console.log('Buffalo parsed: victimsYtd=' + victimsYtd + ' killedYtd=' + killedYtd + ' victimsPrior=' + victimsPrior + ' killedPrior=' + killedPrior + ' latestMonth=' + latestMonth);
 
 
 
-  if (victimsYtd === null || killedYtd === null) {
+  if (!foundAnyCurr) {
 
-    var months = rows.slice(1).map(function(r) { return r.split('\t')[0]; });
+    var allMonths = rows.slice(1).map(function(r) { return r.split('\t')[0]; });
 
-    var unique = months.filter(function(v, i, a) { return a.indexOf(v) === i; });
+    var unique = allMonths.filter(function(v, i, a) { return a.indexOf(v) === i; });
 
-    throw new Error('Buffalo: could not find ' + janCurr + ' values. Last months: ' + unique.slice(-6).join(', '));
+    throw new Error('Buffalo: no current year data found. Available months: ' + unique.slice(-6).join(', '));
 
   }
 
 
+
+  // Determine asof date from latest month found
+  var asofDate = yr + '-01-31';
+  if (latestMonth) {
+    var moIdx = monthNames.indexOf(latestMonth.split('-')[0]);
+    if (moIdx >= 0) {
+      var lastDay = new Date(yr, moIdx + 1, 0).getDate();
+      asofDate = yr + '-' + String(moIdx + 1).padStart(2, '0') + '-' + String(lastDay).padStart(2, '0');
+    }
+  }
 
   return {
 
     ytd:   victimsYtd + killedYtd,
 
-    prior: (victimsPrior !== null && killedPrior !== null) ? victimsPrior + killedPrior : null,
+    prior: victimsPrior + killedPrior,
 
-    asof:  yr + '-01-31'
+    asof:  asofDate
 
   };
 
@@ -1446,9 +1352,13 @@ async function fetchMiamiDade() {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  await page.waitForTimeout(10000);
-
-
+  // Wait for Power BI iframe to appear instead of fixed 10s
+  try {
+    await page.waitForSelector('iframe[src*="powerbi"]', { timeout: 15000 });
+    await page.waitForTimeout(2000);
+  } catch {
+    await page.waitForTimeout(8000);
+  }
 
   const iframeSrc = await page.evaluate(() => {
 
@@ -1482,7 +1392,7 @@ async function fetchMiamiDade() {
 
   await page.goto(iframeSrc, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  await page.waitForTimeout(20000);
+  await waitForPowerBI(page, 15000);
 
 
 
@@ -2126,7 +2036,7 @@ async function fetchPortland() {
 
 
 
-  const header = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+  const header = parseCsvLine(lines[0]);
 
   const iYear = header.indexOf('Occur Year');
 
@@ -2156,7 +2066,7 @@ async function fetchPortland() {
 
     if (!lines[i].trim()) continue;
 
-    const cols = lines[i].split(',').map(c => c.trim().replace(/"/g, ''));
+    const cols = parseCsvLine(lines[i]);
 
     const type = cols[iType];
 
@@ -2246,9 +2156,7 @@ async function fetchDenver() {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-
-
-  await page.waitForTimeout(15000);
+  await waitForPowerBI(page, 10000);
 
   const page1Text = await page.evaluate(() => document.body.innerText);
 
@@ -2372,63 +2280,15 @@ async function fetchDenver() {
 
     const base64Image = screenshotBuf.toString('base64');
 
-
-
     const promptText = [
-
       'This is a Denver Police Department Power BI dashboard showing "Reported Firearm Homicides and Non-Fatal Shootings in Denver".',
-
       'It shows two main numbers: the current year YTD count and the previous year YTD count for "Firearm Homicides + Non-Fatal Shooting Victims".',
-
       'It also shows "Last Updated" date in the top right.',
-
       'Extract: YTD (current year number), PRIOR (previous year number), and ASOF (Last Updated date in YYYY-MM-DD format).',
-
       'Reply ONLY in this exact format: YTD=N PRIOR=N ASOF=YYYY-MM-DD'
-
     ].join(' ');
 
-
-
-    const body = JSON.stringify({
-
-      model: 'claude-haiku-4-5-20251001',
-
-      max_tokens: 128,
-
-      messages: [{ role: 'user', content: [
-
-        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
-
-        { type: 'text', text: promptText }
-
-      ]}]
-
-    });
-
-    const resp = await new Promise((resolve, reject) => {
-
-      const req = require('https').request({
-
-        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-                   'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body) }
-
-      }, (res) => {
-
-        const chunks = []; res.on('data', c => chunks.push(c));
-
-        res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch(e) { reject(e); } });
-
-      });
-
-      req.on('error', reject); req.write(body); req.end();
-
-    });
-
-    const visionText = (resp.content?.[0]?.text || '').trim();
+    const visionText = await callClaudeVision(base64Image, 'image/png', promptText, { maxTokens: 128 });
 
     console.log('Denver vision response:', visionText);
 
@@ -2490,7 +2350,7 @@ async function fetchPortsmouth() {
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-  await page.waitForTimeout(20000);
+  await waitForPowerBI(page, 15000);
 
 
 
@@ -2558,53 +2418,10 @@ async function fetchPortsmouth() {
 
 
 
-  const body = JSON.stringify({
-
-    model: 'claude-sonnet-4-5-20250929',
-
-    max_tokens: 128,
-
-    messages: [{ role: 'user', content: [
-
-      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Image } },
-
-      { type: 'text', text: promptText }
-
-    ]}]
-
-  });
-
-
-
-  const resp = await new Promise((resolve, reject) => {
-
-    const req = require('https').request({
-
-      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-
-      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-                 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body) }
-
-    }, (res) => {
-
-      const chunks = []; res.on('data', c => chunks.push(c));
-
-      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch(e) { reject(e); } });
-
-    });
-
-    req.on('error', reject); req.write(body); req.end();
-
-  });
-
-
-
-  let visionText = (resp.content?.[0]?.text || '').trim();
+  let visionText = await callClaudeVision(base64Image, 'image/png', promptText,
+    { model: 'claude-sonnet-4-5-20250929', maxTokens: 128 });
 
   console.log('Portsmouth vision response:', visionText);
-
-
 
   for (let retry = 1; retry <= 2 && !visionText.includes('TOTAL='); retry++) {
 
@@ -2612,29 +2429,8 @@ async function fetchPortsmouth() {
 
     await new Promise(r => setTimeout(r, 3000));
 
-    const resp2 = await new Promise((resolve, reject) => {
-
-      const req = require('https').request({
-
-        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY,
-
-                   'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body) }
-
-      }, (res) => {
-
-        const chunks = []; res.on('data', c => chunks.push(c));
-
-        res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch(e) { reject(e); } });
-
-      });
-
-      req.on('error', reject); req.write(body); req.end();
-
-    });
-
-    visionText = (resp2.content?.[0]?.text || '').trim();
+    visionText = await callClaudeVision(base64Image, 'image/png', promptText,
+      { model: 'claude-sonnet-4-5-20250929', maxTokens: 128 });
 
     console.log('Portsmouth vision retry ' + retry + ' response:', visionText);
 
@@ -2848,7 +2644,7 @@ async function fetchHartford() {
 
     }
 
-    return { ytd2026: parseVal(vals[8]), ytd2025: parseVal(vals[9]) };
+    return { ytd: parseVal(vals[8]), prior: parseVal(vals[9]) };
 
   }
 
@@ -2858,13 +2654,13 @@ async function fetchHartford() {
 
 
 
-  console.log('Hartford: non-fatal YTD=' + nonfatal.ytd2026 + ' prior=' + nonfatal.ytd2025);
+  console.log('Hartford: non-fatal YTD=' + nonfatal.ytd + ' prior=' + nonfatal.prior);
 
 
 
-  var ytd = nonfatal.ytd2026;
+  var ytd = nonfatal.ytd;
 
-  var prior = nonfatal.ytd2025;
+  var prior = nonfatal.prior;
 
 
 
@@ -3148,7 +2944,25 @@ async function fetchNashville() {
 
 
 
-  if (fs.existsSync(downloadDir)) {
+  // Always try downloading the latest PDF first
+
+  const datesToTry = getReportDatesToTry();
+
+  console.log('Nashville: trying dates:', datesToTry.slice(0, 6).join(', '));
+
+  for (const dateStr of datesToTry) {
+
+    pdfPath = await downloadPdf(dateStr);
+
+    if (pdfPath) break;
+
+  }
+
+
+
+  // Fall back to most recent local PDF if download failed
+
+  if (!pdfPath && fs.existsSync(downloadDir)) {
 
     const existing = fs.readdirSync(downloadDir)
 
@@ -3160,25 +2974,7 @@ async function fetchNashville() {
 
       pdfPath = path.join(downloadDir, existing[0]);
 
-      console.log('Nashville: found local PDF:', existing[0]);
-
-    }
-
-  }
-
-
-
-  if (!pdfPath) {
-
-    const datesToTry = getReportDatesToTry();
-
-    console.log('Nashville: trying dates:', datesToTry.slice(0, 6).join(', '));
-
-    for (const dateStr of datesToTry) {
-
-      pdfPath = await downloadPdf(dateStr);
-
-      if (pdfPath) break;
+      console.log('Nashville: falling back to local PDF:', existing[0]);
 
     }
 

@@ -266,7 +266,6 @@
 <body>
 <div id="prog"></div>
 <div class="wrap">
-  <div id="prog"></div>
 
   <!-- Top rule -->
   <div class="masthead">
@@ -365,6 +364,17 @@
 
 </div>
 <script>
+// ─── STORAGE SHIM (localStorage-backed) ──────────────────────────────────────
+window.storage = {
+  get: async function(key) {
+    var v = localStorage.getItem('sd_' + key);
+    return v !== null ? { value: v } : null;
+  },
+  set: async function(key, value) {
+    localStorage.setItem('sd_' + key, String(value));
+  }
+};
+
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 async function socrataCount(url, where) {
@@ -405,6 +415,37 @@ var CURRENT_YEAR = new Date().getFullYear();
       if (r.ok) _autoData = await r.json();
     } catch(e) { _autoData = {}; }
     return _autoData || {};
+  }
+
+  // ─── Shared auto-data helpers ─────────────────────────────────────────────
+  async function autoCount(cityKey, s) {
+    var auto = await loadAutoData();
+    var d = auto[cityKey];
+    if (d && d.ok) {
+      var windowYear = parseInt(s.slice(0, 4));
+      var asofYear = d.asof ? parseInt(d.asof.slice(0, 4)) : CURRENT_YEAR;
+      return windowYear === asofYear ? d.ytd : d.prior;
+    }
+    return null;
+  }
+  async function autoLatest(cityKey) {
+    var auto = await loadAutoData();
+    var d = auto[cityKey];
+    if (d && d.ok && d.asof) return d.asof;
+    return null;
+  }
+
+  // Auto-data with manual storage fallback (for manual-entry cities)
+  async function autoOrManualCount(cityKey, cityId, s) {
+    var v = await autoCount(cityKey, s);
+    if (v != null) return v;
+    var key = 'manual_' + cityId + '_' + s.slice(0, 4);
+    try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
+  }
+  async function autoOrManualLatest(cityKey, cityId) {
+    var v = await autoLatest(cityKey);
+    if (v != null) return v;
+    try { var r = await window.storage.get('manual_' + cityId + '_asof'); return r ? r.value : null; } catch(e) { return null; }
   }
 
   // ─── PROXY SERVER URL ────────────────────────────────────────────────────────
@@ -471,7 +512,7 @@ var CITIES = [
         window.pdfjsLib.GlobalWorkerOptions.workerSrc =
           'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
       }
-      var resp = await fetch(this._pdfUrl, { signal: AbortSignal.timeout(20000) });
+      var resp = await fetch(this._pdfUrl + '?_t=' + Date.now(), { signal: AbortSignal.timeout(20000), cache: 'no-store' });
       if (!resp.ok) throw new Error('PDF fetch HTTP ' + resp.status);
       var buf = await resp.arrayBuffer();
       var pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -575,20 +616,8 @@ var CITIES = [
     note: 'Gunshot Victims (MNPD Crime Initiative Book)',
     type: 'Victims',
     dataUrl: 'https://metronashville.sharepoint.com/sites/MNPDCrimeAnalysis-Public/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FMNPDCrimeAnalysis%2DPublic%2FShared%20Documents%2FWeekly%20Crime%20%2D%20Initiative%20Book&p=true&ga=1',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.nashville && auto.nashville.ok) {
-        var asofYear = auto.nashville.asof ? parseInt(auto.nashville.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.nashville.ytd : auto.nashville.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.nashville && auto.nashville.ok && auto.nashville.asof) return auto.nashville.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('nashville', s); },
+    latest: function() { return autoLatest('nashville'); }
   },
   {
     id: 'boston',
@@ -741,7 +770,7 @@ var CITIES = [
         window.pdfjsLib.GlobalWorkerOptions.workerSrc =
           'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
       }
-      var resp = await fetch(this._pdfUrl, { signal: AbortSignal.timeout(20000) });
+      var resp = await fetch(this._pdfUrl + '?_t=' + Date.now(), { signal: AbortSignal.timeout(20000), cache: 'no-store' });
       if (!resp.ok) throw new Error('PDF fetch HTTP ' + resp.status);
       var buf = await resp.arrayBuffer();
       var pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
@@ -763,11 +792,11 @@ var CITIES = [
         idx = tokens.findIndex(function(t, i) {
           return t.match(/^SHOOTING$/i) && tokens[i+1] && tokens[i+1].match(/^VICTIMS$/i);
         });
-        if (idx !== -1) idx = idx; // label spans two tokens, nums start after idx+1
+        // No index adjustment needed — "VICTIMS" at idx+1 is non-numeric and gets skipped by the loop below
       }
       if (idx === -1) throw new Error('Could not find SHOOTING VICTIMS row. Tokens: ' + tokens.slice(0,60).join('|'));
 
-      // Grab next 12 numeric tokens: [7d26, 7d25, 7dchg, 28d26, 28d25, 28dchg, ytd26, ytd25, ytdchg, ...]
+      // Grab numeric tokens after label (% tokens filtered out): [7d_cur, 7d_prior, 28d_cur, 28d_prior, ytd_cur, ytd_prior, ...]
       var nums = [];
       for (var i = idx + 1; i < tokens.length && nums.length < 12; i++) {
         if (tokens[i].match(/^-?[\d,]+\.?\d*$/) && !tokens[i].match(/^-?\d+%$/)) {
@@ -796,23 +825,8 @@ var CITIES = [
     note: 'Non-Fatal Shootings',
     type: 'Non-Fatal',
     dataUrl: 'https://detroitmi.gov/Calendar-and-Events?field_start_value=2026-02-19&title=&term_node_tid_depth=All&term_node_tid_depth_1=1676&term_node_tid_depth_2=All',
-    count: async function(s, e) {
-      // Try auto-fetched data first
-      var auto = await loadAutoData();
-      if (auto.detroit && auto.detroit.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.detroit.asof ? parseInt(auto.detroit.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.detroit.ytd : auto.detroit.prior;
-      }
-      // Fall back to manual storage
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.detroit && auto.detroit.ok && auto.detroit.asof) return auto.detroit.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('detroit', 'detroit', s); },
+    latest: function() { return autoOrManualLatest('detroit', 'detroit'); }
   },
   {
     id: 'durham',
@@ -820,21 +834,8 @@ var CITIES = [
     note: 'Shooting Victims (Fatal + Non-Fatal, Manual)',
     type: 'Victims',
     dataUrl: 'https://www.durhamnc.gov/Archive.aspx?AMID=211',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.durham && auto.durham.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.durham.asof ? parseInt(auto.durham.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.durham.ytd : auto.durham.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.durham && auto.durham.ok && auto.durham.asof) return auto.durham.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('durham', 'durham', s); },
+    latest: function() { return autoOrManualLatest('durham', 'durham'); }
   },
   {
     id: 'neworleans',
@@ -847,7 +848,11 @@ var CITIES = [
       '2025': 'https://data.nola.gov/resource/4xwx-sfte.json'
     },
     _getUrl: function(year) {
-      return this._datasets[String(year)] || this._datasets['2025'];
+      // Fall back to most recent known dataset, not a fixed year
+      var y = String(year);
+      if (this._datasets[y]) return this._datasets[y];
+      var keys = Object.keys(this._datasets).sort();
+      return this._datasets[keys[keys.length - 1]];
     },
     count: async function(s, e) {
       var year = s.slice(0, 4);
@@ -882,20 +887,8 @@ var CITIES = [
     note: 'Shooting Incidents (Homicide + Non-Fatal Injury)',
     type: 'Incidents',
     dataUrl: 'https://public.tableau.com/views/PPBOpenDataDownloads/Shootings.csv?:showVizHome=no',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.portland && auto.portland.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.portland.asof ? parseInt(auto.portland.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.portland.ytd : auto.portland.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.portland && auto.portland.ok && auto.portland.asof) return auto.portland.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('portland', s); },
+    latest: function() { return autoLatest('portland'); }
   },
   {
     id: 'pittsburgh',
@@ -903,21 +896,8 @@ var CITIES = [
     note: 'Shooting Victims (Homicide + Non-Fatal, Gun)',
     type: 'Victims',
     dataUrl: 'https://app.powerbigov.us/view?r=eyJrIjoiMDYzNWMyNGItNWNjMS00ODMwLWIxZDgtMTNkNzhlZDE2OWFjIiwidCI6ImY1ZjQ3OTE3LWM5MDQtNDM2OC05MTIwLWQzMjdjZjE3NTU5MSJ9',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.pittsburgh && auto.pittsburgh.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.pittsburgh.asof ? parseInt(auto.pittsburgh.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.pittsburgh.ytd : auto.pittsburgh.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.pittsburgh && auto.pittsburgh.ok && auto.pittsburgh.asof) return auto.pittsburgh.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('pittsburgh', 'pittsburgh', s); },
+    latest: function() { return autoOrManualLatest('pittsburgh', 'pittsburgh'); }
   },
 
 
@@ -927,21 +907,8 @@ var CITIES = [
     note: 'Gunshot Wound Victims (ArcGIS, server-side)',
     type: 'Non-Fatal',
     dataUrl: 'https://opendata.minneapolismn.gov/datasets/cityoflakes::crime-data/about',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.minneapolis && auto.minneapolis.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.minneapolis.asof ? parseInt(auto.minneapolis.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.minneapolis.ytd : auto.minneapolis.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.minneapolis && auto.minneapolis.ok && auto.minneapolis.asof) return auto.minneapolis.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('minneapolis', 'minneapolis', s); },
+    latest: function() { return autoOrManualLatest('minneapolis', 'minneapolis'); }
   },
   {
     id: 'memphis',
@@ -949,21 +916,8 @@ var CITIES = [
     note: 'Non-Fatal Shooting Incidents (Power BI)',
     type: 'Non-Fatal',
     dataUrl: 'https://app.powerbigov.us/view?r=eyJrIjoiZTYyYmQ0Y2QtZTM0Ni00ZTFiLThkMjMtOTYxYWZiOWUyZDU4IiwidCI6IjQxNjQ3NTYxLTY1MzctNDQyMy05NmE5LTg1OWU4OWY4OTE5ZiJ9',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.memphis && auto.memphis.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.memphis.asof ? parseInt(auto.memphis.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.memphis.ytd : auto.memphis.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.memphis && auto.memphis.ok && auto.memphis.asof) return auto.memphis.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('memphis', 'memphis', s); },
+    latest: function() { return autoOrManualLatest('memphis', 'memphis'); }
   },
   {
     id: 'milwaukee',
@@ -971,21 +925,8 @@ var CITIES = [
     note: 'Non-Fatal Shootings (Tableau)',
     type: 'Non-Fatal',
     dataUrl: 'https://www.milwaukee.gov/police/Information-Services/Crime-Maps-and-Statistics',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      if (auto.milwaukee && auto.milwaukee.ok) {
-        var windowYear = parseInt(s.slice(0,4));
-        var asofYear = auto.milwaukee.asof ? parseInt(auto.milwaukee.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.milwaukee.ytd : auto.milwaukee.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.milwaukee && auto.milwaukee.ok && auto.milwaukee.asof) return auto.milwaukee.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('milwaukee', 'milwaukee', s); },
+    latest: function() { return autoOrManualLatest('milwaukee', 'milwaukee'); }
   },
   {
     id: 'lasvegas',
@@ -1029,21 +970,8 @@ var CITIES = [
     note: 'Homicides + Non-Fatal Shooting Victims (Gun)',
     type: 'Hom+NFS',
     dataUrl: 'https://police.cityofomaha.org/opd-crime-statistics',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.omaha && auto.omaha.ok) {
-        var asofYear = auto.omaha.asof ? parseInt(auto.omaha.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.omaha.ytd : auto.omaha.prior;
-      }
-      var key = 'manual_' + this.id + '_' + s.slice(0,4);
-      try { var r = await window.storage.get(key); return r ? parseInt(r.value) : null; } catch(e) { return null; }
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.omaha && auto.omaha.ok && auto.omaha.asof) return auto.omaha.asof;
-      try { var r = await window.storage.get('manual_' + this.id + '_asof'); return r ? r.value : null; } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('omaha', 'omaha', s); },
+    latest: function() { return autoOrManualLatest('omaha', 'omaha'); }
   },
   {
     id: 'miamidade',
@@ -1051,20 +979,8 @@ var CITIES = [
     note: 'Shootings (Power BI)',
     type: 'Incidents',
     dataUrl: 'https://www.miamidade.gov/global/police/crime-stats.page',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.miamidade && auto.miamidade.ok) {
-        var asofYear = auto.miamidade.asof ? parseInt(auto.miamidade.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.miamidade.ytd : auto.miamidade.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.miamidade && auto.miamidade.ok && auto.miamidade.asof) return auto.miamidade.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('miamidade', s); },
+    latest: function() { return autoLatest('miamidade'); }
   },
   {
     id: 'buffalo',
@@ -1073,41 +989,17 @@ var CITIES = [
     note: 'Shooting Victims + Gun Homicides (GIVE)',
     type: 'Victims',
     dataUrl: 'https://mypublicdashboard.ny.gov/t/OJRP_PUBLIC/views/GIVEInitiative/GIVE-LandingPage',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.buffalo && auto.buffalo.ok) {
-        var asofYear = auto.buffalo.asof ? parseInt(auto.buffalo.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.buffalo.ytd : auto.buffalo.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.buffalo && auto.buffalo.ok && auto.buffalo.asof) return auto.buffalo.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('buffalo', s); },
+    latest: function() { return autoLatest('buffalo'); }
   },
   {
     id: 'hartford',
     name: 'Hartford, CT',
     note: 'Non-Fatal Shooting Victims (HPD CompStat)',
     type: 'Victims',
-    dataUrl: 'https://www.hartfordct.gov/Government/Departments/HPD/HPD-Community-Info/CompStat',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.hartford && auto.hartford.ok) {
-        var asofYear = auto.hartford.asof ? parseInt(auto.hartford.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.hartford.ytd : auto.hartford.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.hartford && auto.hartford.ok && auto.hartford.asof) return auto.hartford.asof;
-      return null;
-    }
+    dataUrl: 'https://www.hartfordct.gov/Government/Departments/Police/Crime-Stats/2026-Crime-Statistics',
+    count: function(s) { return autoCount('hartford', s); },
+    latest: function() { return autoLatest('hartford'); }
   },
   {
     id: 'charlotte',
@@ -1184,20 +1076,8 @@ var CITIES = [
     note: 'Firearm Homicides + Non-Fatal Shooting Victims',
     type: 'Victims',
     dataUrl: 'https://www.denvergov.org/Government/Agencies-Departments-Offices/Agencies-Departments-Offices-Directory/Police-Department/Performance-and-Transparency#section-5',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.denver && auto.denver.ok) {
-        var asofYear = auto.denver.asof ? parseInt(auto.denver.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.denver.ytd : auto.denver.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.denver && auto.denver.ok && auto.denver.asof) return auto.denver.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('denver', s); },
+    latest: function() { return autoLatest('denver'); }
   },
   {
     id: 'portsmouth',
@@ -1205,20 +1085,8 @@ var CITIES = [
     note: 'GSW Victims (Total minus Suicide)',
     type: 'Victims',
     dataUrl: 'https://app.powerbigov.us/view?r=eyJrIjoiZDc3ZmQyYzMtOTgyYi00ODQzLTk4ZWUtZWQyY2ZkODM5ZWNkIiwidCI6ImM3N2RiNGQ4LWEwZjUtNDU0YS05MmMxLWI3ZDg0YzY0ZmQ0NCJ9',
-    count: async function(s, e) {
-      var auto = await loadAutoData();
-      var windowYear = parseInt(s.slice(0,4));
-      if (auto.portsmouth && auto.portsmouth.ok) {
-        var asofYear = auto.portsmouth.asof ? parseInt(auto.portsmouth.asof.slice(0,4)) : CURRENT_YEAR;
-        return windowYear === asofYear ? auto.portsmouth.ytd : auto.portsmouth.prior;
-      }
-      return null;
-    },
-    latest: async function() {
-      var auto = await loadAutoData();
-      if (auto.portsmouth && auto.portsmouth.ok && auto.portsmouth.asof) return auto.portsmouth.asof;
-      return null;
-    }
+    count: function(s) { return autoCount('portsmouth', s); },
+    latest: function() { return autoLatest('portsmouth'); }
   }
 ];
 
