@@ -1885,6 +1885,41 @@ async function fetchMinneapolis() {
 
 
 
+// ─── Aurora, IL (PACT Statistics PDF) ─────────────────────────────────────────
+
+async function fetchAurora() {
+  const url = 'https://www.auroragov.org/common/pages/GetFile.ashx?key=ggZDAT74';
+  console.log('Aurora: fetching PACT PDF...');
+  const resp = await fetchUrl(url, 30000);
+  if (resp.status !== 200) throw new Error('Aurora: HTTP ' + resp.status);
+  console.log('Aurora: PDF size:', resp.body.length, 'bytes');
+
+  const tokens = await extractPdfTokens(resp.body, 1);
+  const joined = tokens.join(' ');
+
+  // Find "All Shootings (bullet hit flesh)" row — 5 label tokens then 15 value columns
+  const idx = joined.indexOf('All Shootings');
+  if (idx === -1) throw new Error('Aurora: "All Shootings" row not found in PDF');
+  const vals = joined.substring(idx).split(/\s+/).slice(5); // skip label tokens
+
+  // Column layout: Wk2 Wk3 Wk4 Wk5 WeeklyAvg 4WkPrior 4WkCurrent 4WkDiff 4Wk%Chg 3YrAvg YTDLast YTDCurrent ...
+  const ytdLast = parseInt(vals[10]);
+  const ytdCurrent = parseInt(vals[11]);
+  console.log('Aurora: YTD current=' + ytdCurrent + ' prior=' + ytdLast);
+
+  if (isNaN(ytdCurrent)) throw new Error('Aurora: could not parse YTD current. Tokens: ' + vals.slice(0, 15).join(' '));
+
+  // Get as-of date from "Ran: M/D/YYYY" timestamp
+  let asof = null;
+  const ranMatch = joined.match(/Ran:\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (ranMatch) {
+    asof = ranMatch[3] + '-' + ranMatch[1].padStart(2, '0') + '-' + ranMatch[2].padStart(2, '0');
+  }
+
+  return { ytd: ytdCurrent, prior: ytdLast, asof };
+}
+
+
 async function main() {
 
   const fetchedAt = new Date().toISOString();
@@ -1966,6 +2001,7 @@ async function main() {
     safe('Portsmouth',  fetchPortsmouth,  120000),
 
     safe('Omaha',       fetchOmaha,       60000),
+    safe('Aurora',       fetchAurora,      60000),
   ]);
 
 
