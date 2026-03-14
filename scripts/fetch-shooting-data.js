@@ -1706,40 +1706,60 @@ async function fetchMinneapolis() {
 // ─── Aurora, IL (PACT Statistics PDF) ─────────────────────────────────────────
 
 async function fetchAurora() {
-  // Scrape the crime data page to find the latest PACT PDF link.
-  // Page structure: year folders > month folders > GetFile.ashx?key= links with date text
-  console.log('Aurora: loading crime data page...');
-  const pageResp = await fetchUrl('https://www.auroragov.org/residents/public_safety/police/crime_data', 30000);
-  if (pageResp.status !== 200) throw new Error('Aurora: page HTTP ' + pageResp.status);
-  const html = pageResp.body.toString('utf8');
+  // Crime data page is JS-rendered — need Playwright to expand year/month folders.
+  // Structure: year folders > month folders > GetFile.ashx?key= links with date text (M-D-YY)
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
 
-  // Debug: show GetFile snippets
-  const getFileSnippets = html.match(/GetFile[^"]{0,60}/g);
-  console.log('Aurora: GetFile snippets:', JSON.stringify(getFileSnippets ? getFileSnippets.slice(0, 5) : 'none'));
-  // Debug: show date-like text near GetFile
-  const nearbyPattern = /GetFile\.ashx\?key=([^"&]+)"[^>]*>[^<]*<[\s\S]{0,200}/g;
-  let dbg;
-  while ((dbg = nearbyPattern.exec(html)) !== null) {
-    console.log('Aurora: GetFile context:', dbg[0].substring(0, 150));
+  console.log('Aurora: loading crime data page...');
+  await page.goto('https://www.auroragov.org/residents/public_safety/police/crime_data', { waitUntil: 'networkidle', timeout: 30000 });
+
+  // Click current year folder
+  const yr = new Date().getFullYear();
+  try {
+    await page.locator('a', { hasText: yr + ' - Crime Data' }).click();
+    await page.waitForTimeout(1000);
+    console.log('Aurora: expanded ' + yr + ' folder');
+  } catch (e) { console.log('Aurora: could not expand year folder:', e.message); }
+
+  // Click latest month folder to expand it
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  for (let i = monthNames.length - 1; i >= 0; i--) {
+    try {
+      const monthLink = page.locator('a', { hasText: new RegExp('^' + monthNames[i]) });
+      if (await monthLink.count() > 0) {
+        await monthLink.first().click();
+        await page.waitForTimeout(800);
+        console.log('Aurora: expanded ' + monthNames[i]);
+        break;
+      }
+    } catch (e) { /* month not found, try earlier */ }
   }
 
-  // Find all GetFile links with date-like text (M-D-YY)
-  const linkPattern = /GetFile\.ashx\?key=([^"&]+).*?>([\d]+-[\d]+-[\d]+)</g;
+  // Find all GetFile links with date-like text
+  const pdfLinks = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('a[href*="GetFile"]'))
+      .map(a => ({ href: a.href, text: a.textContent.trim() }))
+      .filter(l => /^\d+-\d+-\d+$/.test(l.text));
+  });
+  console.log('Aurora: found', pdfLinks.length, 'PDF links:', JSON.stringify(pdfLinks));
+
+  await browser.close();
+
+  // Pick the one with the latest date
   let bestUrl = null, bestDate = null, bestDateNum = 0;
-  let m;
-  while ((m = linkPattern.exec(html)) !== null) {
-    const key = m[1];
-    const dateText = m[2]; // e.g. "2-10-26"
-    const parts = dateText.split('-');
+  for (const link of pdfLinks) {
+    const parts = link.text.split('-');
     if (parts.length === 3) {
       const mo = parseInt(parts[0]), day = parseInt(parts[1]);
-      let yr = parseInt(parts[2]);
-      if (yr < 100) yr += 2000;
-      const dateNum = yr * 10000 + mo * 100 + day;
+      let y = parseInt(parts[2]);
+      if (y < 100) y += 2000;
+      const dateNum = y * 10000 + mo * 100 + day;
       if (dateNum > bestDateNum) {
         bestDateNum = dateNum;
-        bestUrl = 'https://www.auroragov.org/common/pages/GetFile.ashx?key=' + key;
-        bestDate = yr + '-' + String(mo).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+        bestUrl = link.href;
+        bestDate = y + '-' + String(mo).padStart(2, '0') + '-' + String(day).padStart(2, '0');
       }
     }
   }
@@ -1795,7 +1815,7 @@ async function fetchAurora() {
   }
   console.log('Aurora: YTD current=' + ytdCurrent + ' prior=' + ytdLast);
 
-  if (isNaN(ytdCurrent)) throw new Error('Aurora: could not parse YTD current. Tokens: ' + vals.slice(0, 15).join(' '));
+  if (isNaN(ytdCurrent)) throw new Error('Aurora: could not parse YTD current. Numbers: ' + allNums.slice(0, 15).join(', '));
 
   // Use date from page link (more reliable); fall back to PDF "Ran:" timestamp
   let asof = bestDate;
