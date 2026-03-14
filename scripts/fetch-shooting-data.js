@@ -1268,32 +1268,23 @@ async function fetchBuffalo() {
 
 
 
-  let victimsYtd = 0, victimsPrior = 0;
-
-  let killedYtd  = 0, killedPrior  = 0;
+  let ytd = 0, prior = 0;
 
   let latestMonth = null;
 
   let foundAnyCurr = false;
 
-
-
-  // Debug: dump unique categories
-  var uniqueCats = new Set();
+  // Deduplicate rows (Tableau crosstab exports duplicate rows)
+  var seen = new Set();
+  var dedupedRows = [rows[0]];
   for (var i = 1; i < rows.length; i++) {
-    var cols = rows[i].split('\t');
-    if (cols.length >= 2) uniqueCats.add(cols[1].trim());
+    if (!seen.has(rows[i])) { seen.add(rows[i]); dedupedRows.push(rows[i]); }
   }
-  console.log('Buffalo: unique categories:', [...uniqueCats].join(' | '));
+  console.log('Buffalo: deduped from', rows.length, 'to', dedupedRows.length, 'rows');
 
-  // Debug: dump first 10 rows
-  for (var i = 1; i < Math.min(11, rows.length); i++) {
-    console.log('Buffalo row ' + i + ':', rows[i]);
-  }
+  for (var i = 1; i < dedupedRows.length; i++) {
 
-  for (var i = 1; i < rows.length; i++) {
-
-    var cols = rows[i].split('\t');
+    var cols = dedupedRows[i].split('\t');
 
     if (cols.length < 3) continue;
 
@@ -1305,23 +1296,14 @@ async function fetchBuffalo() {
 
     if (isNaN(count)) continue;
 
-
-
-    var isKilled  = category.indexOf('individuals killed') >= 0 || category.indexOf('gun violence') >= 0;
-
-    var isVictims = !isKilled && (category.indexOf('shooting victims') >= 0 || category.indexOf('persons hit') >= 0);
-
-    if (!isVictims && !isKilled) continue;
-
-
+    // Use only "Shooting Incidents Involving Injury"
+    if (category.indexOf('shooting incidents') < 0) continue;
 
     if (currMonths.has(month)) {
 
       foundAnyCurr = true;
 
-      if (isVictims) victimsYtd += count;
-
-      if (isKilled)  killedYtd  += count;
+      ytd += count;
 
       latestMonth = month;
 
@@ -1329,9 +1311,7 @@ async function fetchBuffalo() {
 
     if (priorMonths.has(month)) {
 
-      if (isVictims) victimsPrior += count;
-
-      if (isKilled)  killedPrior  += count;
+      prior += count;
 
     }
 
@@ -1339,13 +1319,13 @@ async function fetchBuffalo() {
 
 
 
-  console.log('Buffalo parsed: victimsYtd=' + victimsYtd + ' killedYtd=' + killedYtd + ' victimsPrior=' + victimsPrior + ' killedPrior=' + killedPrior + ' latestMonth=' + latestMonth);
+  console.log('Buffalo parsed: ytd=' + ytd + ' prior=' + prior + ' latestMonth=' + latestMonth);
 
 
 
   if (!foundAnyCurr) {
 
-    var allMonths = rows.slice(1).map(function(r) { return r.split('\t')[0]; });
+    var allMonths = dedupedRows.slice(1).map(function(r) { return r.split('\t')[0]; });
 
     var unique = allMonths.filter(function(v, i, a) { return a.indexOf(v) === i; });
 
@@ -1365,15 +1345,7 @@ async function fetchBuffalo() {
     }
   }
 
-  return {
-
-    ytd:   victimsYtd + killedYtd,
-
-    prior: victimsPrior + killedPrior,
-
-    asof:  asofDate
-
-  };
+  return { ytd, prior, asof: asofDate };
 
 }
 
