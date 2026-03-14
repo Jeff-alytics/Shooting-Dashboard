@@ -1576,18 +1576,8 @@ async function fetchMiamiDade() {
 
 async function fetchOmaha() {
 
-  // URL pattern: /images/crime-statistics-reports/{YEAR}/Website_-_Non-Fatal_Shootings_and_Homicides_MMDDYYYY.pdf
-  // Akamai CDN blocks non-browser requests, so use Playwright to fetch the PDF
-
-  const BASE_ROOT = 'https://police.cityofomaha.org/images/crime-statistics-reports';
-
-  const currentYear = new Date().getFullYear();
-
-  const YEAR_FOLDERS = ['2024', String(currentYear), String(currentYear - 1)];
-
-  const FILENAME = 'Website_-_Non-Fatal_Shootings_and_Homicides';
-
-
+  // Akamai CDN blocks non-browser requests, so use Playwright.
+  // Navigate to the crime stats page, find the latest shooting PDF link, and download it.
 
   const { chromium } = require('playwright');
   const browser = await chromium.launch({ headless: true });
@@ -1595,48 +1585,42 @@ async function fetchOmaha() {
 
   let pdfResp = null;
 
-  const today = new Date();
+  try {
+    console.log('Omaha: loading crime statistics page...');
+    await page.goto('https://police.cityofomaha.org/crime-information/crime-statistics', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(3000);
 
-  for (const yearFolder of YEAR_FOLDERS) {
+    // Find all links containing "Non-Fatal_Shootings" or "Shootings_and_Homicides"
+    const pdfLinks = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('a[href]'))
+        .filter(a => /shooting/i.test(a.href) && /\.pdf/i.test(a.href))
+        .map(a => ({ href: a.href, text: a.textContent.trim() }));
+    });
+    console.log('Omaha: found', pdfLinks.length, 'shooting PDF links');
+    if (pdfLinks.length > 0) console.log('Omaha: links:', JSON.stringify(pdfLinks.slice(0, 5)));
 
-    if (pdfResp) break;
-
-    const BASE = `${BASE_ROOT}/${yearFolder}`;
-
-    for (let daysBack = 0; daysBack <= 60; daysBack++) {
-
-      const d = new Date(today);
-
-      d.setDate(today.getDate() - daysBack);
-
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-
-      const dd = String(d.getDate()).padStart(2, '0');
-
-      const yyyy = d.getFullYear();
-
-      const candidate = `${BASE}/${FILENAME}_${mm}${dd}${yyyy}.pdf`;
-
-      try {
-
-        const resp = await page.goto(candidate, { waitUntil: 'load', timeout: 10000 });
-
-        if (resp && resp.status() === 200) {
-
-          const body = await resp.body();
-
-          pdfResp = { body };
-
-          console.log('Omaha: found PDF at', candidate);
-
-          break;
-
-        }
-
-      } catch (e) { /* try next date */ }
-
+    // Pick the one with the latest date in the filename (MMDDYYYY)
+    let bestUrl = null, bestDate = 0;
+    for (const link of pdfLinks) {
+      const dateMatch = link.href.match(/(\d{2})(\d{2})(\d{4})\.pdf/);
+      if (dateMatch) {
+        const dateNum = parseInt(dateMatch[3] + dateMatch[1] + dateMatch[2]); // YYYYMMDD
+        if (dateNum > bestDate) { bestDate = dateNum; bestUrl = link.href; }
+      }
     }
 
+    if (bestUrl) {
+      console.log('Omaha: downloading', bestUrl);
+      const resp = await page.goto(bestUrl, { waitUntil: 'load', timeout: 30000 });
+      if (resp && resp.status() === 200) {
+        pdfResp = { body: await resp.body() };
+        console.log('Omaha: PDF downloaded, size:', pdfResp.body.length);
+      }
+    } else {
+      console.log('Omaha: no shooting PDF links found on page');
+    }
+  } catch (e) {
+    console.log('Omaha: page scrape failed:', e.message);
   }
 
   await browser.close();
