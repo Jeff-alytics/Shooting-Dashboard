@@ -1278,6 +1278,19 @@ async function fetchBuffalo() {
 
 
 
+  // Debug: dump unique categories
+  var uniqueCats = new Set();
+  for (var i = 1; i < rows.length; i++) {
+    var cols = rows[i].split('\t');
+    if (cols.length >= 2) uniqueCats.add(cols[1].trim());
+  }
+  console.log('Buffalo: unique categories:', [...uniqueCats].join(' | '));
+
+  // Debug: dump first 10 rows
+  for (var i = 1; i < Math.min(11, rows.length); i++) {
+    console.log('Buffalo row ' + i + ':', rows[i]);
+  }
+
   for (var i = 1; i < rows.length; i++) {
 
     var cols = rows[i].split('\t');
