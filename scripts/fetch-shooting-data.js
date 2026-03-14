@@ -42,7 +42,7 @@ function fetchUrl(targetUrl, timeoutMs = 20000, _maxRedirects = 10) {
 
       method: 'GET',
 
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ShootingDashboard/1.0)' },
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
 
       timeout: timeoutMs,
 
@@ -1577,16 +1577,21 @@ async function fetchMiamiDade() {
 async function fetchOmaha() {
 
   // URL pattern: /images/crime-statistics-reports/{YEAR}/Website_-_Non-Fatal_Shootings_and_Homicides_MMDDYYYY.pdf
+  // Akamai CDN blocks non-browser requests, so use Playwright to fetch the PDF
 
   const BASE_ROOT = 'https://police.cityofomaha.org/images/crime-statistics-reports';
 
   const currentYear = new Date().getFullYear();
 
-  const YEAR_FOLDERS = [String(currentYear), String(currentYear - 1), '2024'];
+  const YEAR_FOLDERS = ['2024', String(currentYear), String(currentYear - 1)];
 
   const FILENAME = 'Website_-_Non-Fatal_Shootings_and_Homicides';
 
 
+
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
 
   let pdfResp = null;
 
@@ -1614,11 +1619,13 @@ async function fetchOmaha() {
 
       try {
 
-        const resp = await fetchUrl(candidate, 10000);
+        const resp = await page.goto(candidate, { waitUntil: 'load', timeout: 10000 });
 
-        if (resp.status === 200) {
+        if (resp && resp.status() === 200) {
 
-          pdfResp = resp;
+          const body = await resp.body();
+
+          pdfResp = { body };
 
           console.log('Omaha: found PDF at', candidate);
 
@@ -1631,6 +1638,8 @@ async function fetchOmaha() {
     }
 
   }
+
+  await browser.close();
 
 
 
