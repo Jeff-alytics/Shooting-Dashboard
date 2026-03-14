@@ -1706,10 +1706,39 @@ async function fetchMinneapolis() {
 // ─── Aurora, IL (PACT Statistics PDF) ─────────────────────────────────────────
 
 async function fetchAurora() {
-  const url = 'https://www.auroragov.org/common/pages/GetFile.ashx?key=ggZDAT74';
-  console.log('Aurora: fetching PACT PDF...');
-  const resp = await fetchUrl(url, 30000);
-  if (resp.status !== 200) throw new Error('Aurora: HTTP ' + resp.status);
+  // Scrape the crime data page to find the latest PACT PDF link.
+  // Page structure: year folders > month folders > GetFile.ashx?key= links with date text
+  console.log('Aurora: loading crime data page...');
+  const pageResp = await fetchUrl('https://www.auroragov.org/residents/public_safety/police/crime_data', 30000);
+  if (pageResp.status !== 200) throw new Error('Aurora: page HTTP ' + pageResp.status);
+  const html = pageResp.body.toString('utf8');
+
+  // Find all GetFile links with date-like text (M-D-YY)
+  const linkPattern = /GetFile\.ashx\?key=([^"&]+).*?>([\d]+-[\d]+-[\d]+)</g;
+  let bestUrl = null, bestDate = null, bestDateNum = 0;
+  let m;
+  while ((m = linkPattern.exec(html)) !== null) {
+    const key = m[1];
+    const dateText = m[2]; // e.g. "2-10-26"
+    const parts = dateText.split('-');
+    if (parts.length === 3) {
+      const mo = parseInt(parts[0]), day = parseInt(parts[1]);
+      let yr = parseInt(parts[2]);
+      if (yr < 100) yr += 2000;
+      const dateNum = yr * 10000 + mo * 100 + day;
+      if (dateNum > bestDateNum) {
+        bestDateNum = dateNum;
+        bestUrl = 'https://www.auroragov.org/common/pages/GetFile.ashx?key=' + key;
+        bestDate = yr + '-' + String(mo).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+      }
+    }
+  }
+
+  if (!bestUrl) throw new Error('Aurora: no PACT PDF links found on crime data page');
+  console.log('Aurora: latest PDF:', bestUrl, 'date:', bestDate);
+
+  const resp = await fetchUrl(bestUrl, 30000);
+  if (resp.status !== 200) throw new Error('Aurora: PDF HTTP ' + resp.status);
   console.log('Aurora: PDF size:', resp.body.length, 'bytes');
 
   const tokens = await extractPdfTokens(resp.body, 1);
@@ -1758,11 +1787,13 @@ async function fetchAurora() {
 
   if (isNaN(ytdCurrent)) throw new Error('Aurora: could not parse YTD current. Tokens: ' + vals.slice(0, 15).join(' '));
 
-  // Get as-of date from "Ran: M/D/YYYY" timestamp
-  let asof = null;
-  const ranMatch = joined.match(/Ran:\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-  if (ranMatch) {
-    asof = ranMatch[3] + '-' + ranMatch[1].padStart(2, '0') + '-' + ranMatch[2].padStart(2, '0');
+  // Use date from page link (more reliable); fall back to PDF "Ran:" timestamp
+  let asof = bestDate;
+  if (!asof) {
+    const ranMatch = joined.match(/Ran:\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (ranMatch) {
+      asof = ranMatch[3] + '-' + ranMatch[1].padStart(2, '0') + '-' + ranMatch[2].padStart(2, '0');
+    }
   }
 
   return { ytd: ytdCurrent, prior: ytdLast, asof };
