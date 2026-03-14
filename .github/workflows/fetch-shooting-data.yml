@@ -8,10 +8,7 @@ on:
 
 jobs:
   fetch-data:
-    runs-on: [self-hosted, windows]
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-latest
 
     permissions:
       contents: write
@@ -31,12 +28,12 @@ jobs:
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
-          path: ~/AppData/Local/ms-playwright
-          key: playwright-chromium-windows
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-linux
           restore-keys: playwright-chromium-
 
-      - name: Install Playwright Chromium
-        run: npx playwright install chromium
+      - name: Install Playwright Chromium + deps
+        run: npx playwright install --with-deps chromium
 
       - name: Fetch shooting data
         env:
