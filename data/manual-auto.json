@@ -1,4 +1,11 @@
 {
+  "philly": {
+    "ytd": 187,
+    "prior": 324,
+    "asof": "2026-05-07",
+    "fetchedAt": "2026-05-10T00:00:00.000Z",
+    "ok": true
+  },
   "minneapolis": {
     "ytd": 68,
     "prior": 87,

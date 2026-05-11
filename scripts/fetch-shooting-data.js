@@ -1445,6 +1445,47 @@ async function fetchMiamiDade() {
 
 
 
+async function fetchPhilly() {
+
+  const CARTO = 'https://phl.carto.com/api/v2/sql?format=json&q=';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  // Latest date
+  console.log('Philly: fetching latest date...');
+  const latestSql = "SELECT date_ FROM shootings ORDER BY date_ DESC LIMIT 1";
+  const latestResp = await fetchUrl(CARTO + encodeURIComponent(latestSql), 20000);
+  if (latestResp.status !== 200) throw new Error('Philly latest: HTTP ' + latestResp.status);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  if (!latestData.rows || !latestData.rows.length) throw new Error('Philly latest: no rows returned');
+  const asof = String(latestData.rows[0].date_).slice(0, 10);
+  const asofYear = parseInt(asof.slice(0, 4));
+
+  // Build windows
+  const ytdStart = asofYear + '-01-01';
+  const priorStart = (asofYear - 1) + '-01-01';
+  const priorEnd = (asofYear - 1) + asof.slice(4);
+
+  async function fetchCount(startDate, endDate) {
+    const sql = "SELECT COUNT(*) AS n FROM shootings WHERE date_ >= '" + startDate + "' AND date_ <= '" + endDate + "'";
+    const resp = await fetchUrl(CARTO + encodeURIComponent(sql), 20000);
+    if (resp.status !== 200) throw new Error('Philly count: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    return parseInt(d.rows[0].n);
+  }
+
+  console.log('Philly: fetching YTD (' + ytdStart + ' to ' + asof + ') and prior (' + priorStart + ' to ' + priorEnd + ')...');
+  const [ytd, prior] = await Promise.all([
+    fetchCount(ytdStart, asof),
+    fetchCount(priorStart, priorEnd),
+  ]);
+
+  console.log('Philly: asof=' + asof + ' ytd=' + ytd + ' prior=' + prior);
+  return { ytd, prior, asof };
+
+}
+
+
+
 async function fetchMinneapolis() {
 
   const BASE = 'https://services.arcgis.com/afSMGVsC7QlRK1kZ/arcgis/rest/services/Crime_Data/FeatureServer/0/query';
@@ -1621,6 +1662,8 @@ async function main() {
   console.log('Starting all fetches in parallel...');
 
   const fetches = await Promise.all([
+
+    safe('Philly',      fetchPhilly,      60000),
 
     safe('Minneapolis', fetchMinneapolis, 60000),
 
