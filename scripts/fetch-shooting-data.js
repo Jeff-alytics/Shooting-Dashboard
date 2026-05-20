@@ -1589,6 +1589,391 @@ async function fetchVegas() {
 
 
 
+// ─── Chicago (Socrata) ──────────────────────────────────────────────────────
+
+async function fetchChicago() {
+  const base = 'https://data.cityofchicago.org/resource/gumc-mgzr.json';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  async function socrataCount(where) {
+    const url = base + '?$where=' + encodeURIComponent(where) + '&$select=count(*)%20as%20n&$limit=1';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Chicago: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    return parseInt(d[0] && d[0].n ? d[0].n : 0);
+  }
+
+  // Latest date
+  const latestUrl = base + '?$order=date%20DESC&$limit=1&$select=date&$where=' + encodeURIComponent("gunshot_injury_i = 'YES'");
+  const latestResp = await fetchUrl(latestUrl);
+  if (latestResp.status !== 200) throw new Error('Chicago latest: HTTP ' + latestResp.status);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  const asof = latestData[0] && latestData[0].date ? latestData[0].date.slice(0, 10) : null;
+  if (!asof) throw new Error('Chicago: no latest date');
+
+  const ytdWhere = "date >= '" + CURRENT_YEAR + "-01-01T00:00:00.000' AND date <= '" + asof + "T23:59:59.000' AND gunshot_injury_i = 'YES'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = "date >= '" + (CURRENT_YEAR - 1) + "-01-01T00:00:00.000' AND date <= '" + priorEnd + "T23:59:59.000' AND gunshot_injury_i = 'YES'";
+
+  const [ytd, prior] = await Promise.all([socrataCount(ytdWhere), socrataCount(priorWhere)]);
+  console.log('Chicago: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Baltimore (ArcGIS) ─────────────────────────────────────────────────────
+
+async function fetchBaltimore() {
+  const base = 'https://services1.arcgis.com/UWYHeuuJISiGmgXx/arcgis/rest/services/NIBRS_GroupA_Crime_Data/FeatureServer/0/query';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  async function arcCount(where) {
+    const url = base + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Baltimore: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    if (d.error) throw new Error('Baltimore: ' + (d.error.message || JSON.stringify(d.error).slice(0, 120)));
+    return d.count;
+  }
+
+  // Latest
+  const latestUrl = base + '?where=' + encodeURIComponent("Shooting = 'Y'") +
+    '&outFields=CrimeDateTime&orderByFields=CrimeDateTime+DESC&resultRecordCount=1&f=json';
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  let asof = null;
+  if (latestData.features && latestData.features.length) {
+    const raw = latestData.features[0].attributes.CrimeDateTime;
+    if (typeof raw === 'number') {
+      const dt = new Date(raw);
+      asof = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+    }
+  }
+  if (!asof) throw new Error('Baltimore: no latest date');
+
+  const ytdWhere = "Shooting = 'Y' AND CrimeDateTime >= DATE '" + CURRENT_YEAR + "-01-01' AND CrimeDateTime <= DATE '" + asof + "'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = "Shooting = 'Y' AND CrimeDateTime >= DATE '" + (CURRENT_YEAR - 1) + "-01-01' AND CrimeDateTime <= DATE '" + priorEnd + "'";
+
+  const [ytd, prior] = await Promise.all([arcCount(ytdWhere), arcCount(priorWhere)]);
+  console.log('Baltimore: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Louisville (ArcGIS) ────────────────────────────────────────────────────
+
+async function fetchLouisville() {
+  const base = 'https://services1.arcgis.com/79kfd2K6fskCAkyg/arcgis/rest/services/Gun_Violence_Data/FeatureServer/0/query';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  async function arcCount(where) {
+    const url = base + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Louisville: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    if (d.error) throw new Error('Louisville: ' + (d.error.message || JSON.stringify(d.error).slice(0, 120)));
+    return d.count;
+  }
+
+  const crimeFilter = "(Crime_Type = 'Non-Fatal Shooting' OR Crime_Type = 'Homicide')";
+  const latestUrl = base + '?where=' + encodeURIComponent(crimeFilter) +
+    '&outFields=DateTime&orderByFields=DateTime+DESC&resultRecordCount=1&f=json';
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  let asof = null;
+  if (latestData.features && latestData.features.length) {
+    const raw = latestData.features[0].attributes.DateTime;
+    if (typeof raw === 'number') {
+      const dt = new Date(raw);
+      asof = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+    }
+  }
+  if (!asof) throw new Error('Louisville: no latest date');
+
+  const ytdWhere = crimeFilter + " AND DateTime >= '" + CURRENT_YEAR + "-01-01 00:00:00' AND DateTime <= '" + asof + " 23:59:59'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = crimeFilter + " AND DateTime >= '" + (CURRENT_YEAR - 1) + "-01-01 00:00:00' AND DateTime <= '" + priorEnd + " 23:59:59'";
+
+  const [ytd, prior] = await Promise.all([arcCount(ytdWhere), arcCount(priorWhere)]);
+  console.log('Louisville: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Rochester (ArcGIS) ─────────────────────────────────────────────────────
+
+async function fetchRochester() {
+  const base = 'https://services7.arcgis.com/wMvCpnbQEKXZsPSQ/arcgis/rest/services/Rochester_NY_Shooting_Victims/FeatureServer/0/query';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  async function arcCount(where) {
+    const url = base + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Rochester: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    if (d.error) throw new Error('Rochester: ' + (d.error.message || JSON.stringify(d.error).slice(0, 120)));
+    return d.count;
+  }
+
+  const latestUrl = base + '?where=1%3D1&outFields=Occurred_Date&orderByFields=Occurred_Date+DESC&resultRecordCount=1&f=json';
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  let asof = null;
+  if (latestData.features && latestData.features.length) {
+    const raw = latestData.features[0].attributes.Occurred_Date;
+    if (typeof raw === 'number') {
+      const dt = new Date(raw);
+      asof = dt.getFullYear() + '-' + String(dt.getMonth()+1).padStart(2,'0') + '-' + String(dt.getDate()).padStart(2,'0');
+    }
+  }
+  if (!asof) throw new Error('Rochester: no latest date');
+
+  const ytdWhere = "Occurred_Date >= DATE '" + CURRENT_YEAR + "-01-01' AND Occurred_Date <= DATE '" + asof + "'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = "Occurred_Date >= DATE '" + (CURRENT_YEAR - 1) + "-01-01' AND Occurred_Date <= DATE '" + priorEnd + "'";
+
+  const [ytd, prior] = await Promise.all([arcCount(ytdWhere), arcCount(priorWhere)]);
+  console.log('Rochester: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Seattle (Socrata) ──────────────────────────────────────────────────────
+
+async function fetchSeattle() {
+  const base = 'https://data.seattle.gov/resource/tazs-3rd5.json';
+  const CURRENT_YEAR = new Date().getFullYear();
+  const shootingFilter = "(shooting_type_group = 'Shooting (Fatal Injury)' OR shooting_type_group = 'Shooting (Non-Fatal Injury)') AND nibrs_crime_against_category = 'PERSON'";
+
+  async function socrataCount(where) {
+    const url = base + '?$where=' + encodeURIComponent(where) + '&$select=count(DISTINCT%20report_number)%20as%20n&$limit=1';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Seattle: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    return parseInt(d[0] && d[0].n ? d[0].n : 0);
+  }
+
+  const latestUrl = base + '?$order=offense_date%20DESC&$limit=1&$select=offense_date&$where=' + encodeURIComponent(shootingFilter);
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  const asof = latestData[0] && latestData[0].offense_date ? latestData[0].offense_date.slice(0, 10) : null;
+  if (!asof) throw new Error('Seattle: no latest date');
+
+  const ytdWhere = shootingFilter + " AND offense_date >= '" + CURRENT_YEAR + "-01-01T00:00:00' AND offense_date <= '" + asof + "T23:59:59'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = shootingFilter + " AND offense_date >= '" + (CURRENT_YEAR - 1) + "-01-01T00:00:00' AND offense_date <= '" + priorEnd + "T23:59:59'";
+
+  const [ytd, prior] = await Promise.all([socrataCount(ytdWhere), socrataCount(priorWhere)]);
+  console.log('Seattle: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Cincinnati (Socrata) ───────────────────────────────────────────────────
+
+async function fetchCincinnati() {
+  const base = 'https://data.cincinnati-oh.gov/resource/sfea-4ksu.json';
+  const CURRENT_YEAR = new Date().getFullYear();
+  function fmt(d) { return d.replace(/-/g, ''); }
+
+  async function socrataCount(where) {
+    const url = base + '?$where=' + encodeURIComponent(where) + '&$select=count(*)%20as%20n&$limit=1';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('Cincinnati: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    return parseInt(d[0] && d[0].n ? d[0].n : 0);
+  }
+
+  const latestUrl = base + '?$order=dateoccurred%20DESC&$limit=1&$select=dateoccurred';
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  let asof = null;
+  if (latestData[0] && latestData[0].dateoccurred) {
+    const raw = latestData[0].dateoccurred;
+    asof = raw.length === 8 ? raw.slice(0,4) + '-' + raw.slice(4,6) + '-' + raw.slice(6,8) : raw.slice(0, 10);
+  }
+  if (!asof) throw new Error('Cincinnati: no latest date');
+
+  const ytdWhere = "`dateoccurred` >= '" + fmt(CURRENT_YEAR + '-01-01') + "' AND `dateoccurred` <= '" + fmt(asof) + "'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = "`dateoccurred` >= '" + fmt((CURRENT_YEAR - 1) + '-01-01') + "' AND `dateoccurred` <= '" + fmt(priorEnd) + "'";
+
+  const [ytd, prior] = await Promise.all([socrataCount(ytdWhere), socrataCount(priorWhere)]);
+  console.log('Cincinnati: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── New Orleans (Socrata CFS) ──────────────────────────────────────────────
+
+async function fetchNewOrleans() {
+  const CURRENT_YEAR = new Date().getFullYear();
+  const datasets = { '2026': 'https://data.nola.gov/resource/es9j-6y5d.json', '2025': 'https://data.nola.gov/resource/4xwx-sfte.json' };
+  function getUrl(year) { return datasets[String(year)] || datasets[Object.keys(datasets).sort().pop()]; }
+
+  async function socrataCount(baseUrl, where) {
+    const url = baseUrl + '?$where=' + encodeURIComponent(where) + '&$select=count(*)+as+n&$limit=1';
+    const resp = await fetchUrl(url); if (resp.status !== 200) throw new Error('NewOrleans: HTTP ' + resp.status);
+    const d = JSON.parse(resp.body.toString('utf8'));
+    return parseInt(d[0] && d[0].n ? d[0].n : 0);
+  }
+
+  const cfsFilter = "(type_ = '30S' OR type_ = '34S') AND disposition = 'RTF'";
+  const latestUrl = getUrl(CURRENT_YEAR) + '?$order=timecreate%20DESC&$limit=1&$select=timecreate&$where=' + encodeURIComponent(cfsFilter);
+  const latestResp = await fetchUrl(latestUrl);
+  const latestData = JSON.parse(latestResp.body.toString('utf8'));
+  const asof = latestData[0] && latestData[0].timecreate ? latestData[0].timecreate.slice(0, 10) : null;
+  if (!asof) throw new Error('NewOrleans: no latest date');
+
+  const ytdWhere = cfsFilter + " AND timecreate >= '" + CURRENT_YEAR + "-01-01T00:00:00.000' AND timecreate <= '" + asof + "T23:59:59.000'";
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+  const priorWhere = cfsFilter + " AND timecreate >= '" + (CURRENT_YEAR - 1) + "-01-01T00:00:00.000' AND timecreate <= '" + priorEnd + "T23:59:59.000'";
+
+  const [ytd, prior] = await Promise.all([
+    socrataCount(getUrl(CURRENT_YEAR), ytdWhere),
+    socrataCount(getUrl(CURRENT_YEAR - 1), priorWhere)
+  ]);
+  console.log('NewOrleans: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Boston (CSV) ───────────────────────────────────────────────────────────
+
+async function fetchBoston() {
+  const csvUrl = 'https://data.boston.gov/datastore/dump/73c7e069-701f-4910-986d-b950f46c91a1?bom=True';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  console.log('Boston: fetching CSV...');
+  const resp = await fetchUrl(csvUrl, 30000);
+  if (resp.status !== 200) throw new Error('Boston: HTTP ' + resp.status);
+  const text = resp.body.toString('utf8');
+  const lines = text.trim().split('\n');
+  const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+  const dateIdx = headers.findIndex(h => h.toUpperCase() === 'SHOOTING_DATE');
+  if (dateIdx === -1) throw new Error('Boston: SHOOTING_DATE column not found');
+
+  const dates = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',');
+    const val = cols[dateIdx] ? cols[dateIdx].trim().replace(/^"|"$/g, '') : '';
+    if (val) dates.push(val.slice(0, 10));
+  }
+
+  dates.sort();
+  const asof = dates[dates.length - 1];
+  if (!asof) throw new Error('Boston: no dates found');
+
+  const ytdStart = CURRENT_YEAR + '-01-01';
+  const priorStart = (CURRENT_YEAR - 1) + '-01-01';
+  const priorEnd = (CURRENT_YEAR - 1) + asof.slice(4);
+
+  const ytd = dates.filter(d => d >= ytdStart && d <= asof).length;
+  const prior = dates.filter(d => d >= priorStart && d <= priorEnd).length;
+
+  console.log('Boston: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── NYC (NYPD CompStat PDF) ────────────────────────────────────────────────
+
+async function fetchNYC() {
+  const pdfUrl = 'https://www.nyc.gov/assets/nypd/downloads/pdf/crime_statistics/cs-en-us-city.pdf';
+  console.log('NYC: fetching CompStat PDF...');
+  const resp = await fetchUrl(pdfUrl, 20000);
+  if (resp.status !== 200) throw new Error('NYC: HTTP ' + resp.status);
+
+  const tokens = await extractPdfTokens(resp.body, 1);
+  const text = tokens.join(' ');
+
+  // Date range: "1/1/2026 12:00:00 AM Through 5/11/2026 12:00:00 AM"
+  const dateMatch = text.match(/Through\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+  let asof = null;
+  if (dateMatch) {
+    asof = dateMatch[3] + '-' + String(parseInt(dateMatch[1])).padStart(2,'0') + '-' + String(parseInt(dateMatch[2])).padStart(2,'0');
+  }
+
+  // Find "SHOOTING VIC" or "Shooting Vic" row — numbers after it: ytd, prior
+  const shootMatch = text.match(/Shooting\s*Vic[^\n]*?([\d,]+)\s+([\d,]+)\s+([\d,]+)\s+([\d,]+)/i);
+  if (!shootMatch) {
+    // Try alternate pattern
+    const idx = text.indexOf('SHOOTING VIC');
+    if (idx === -1) throw new Error('NYC: "Shooting Vic" not found. Tokens: ' + tokens.slice(0,60).join('|'));
+    const after = text.substring(idx).split(/\s+/).filter(t => /^\d/.test(t));
+    if (after.length < 4) throw new Error('NYC: not enough numbers after Shooting Vic');
+    const ytd = parseInt(after[2].replace(/,/g, ''));
+    const prior = parseInt(after[3].replace(/,/g, ''));
+    console.log('NYC: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+    return { ytd, prior, asof };
+  }
+
+  const ytd = parseInt(shootMatch[3].replace(/,/g, ''));
+  const prior = parseInt(shootMatch[4].replace(/,/g, ''));
+  console.log('NYC: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── St. Louis (CompStat PDF) ───────────────────────────────────────────────
+
+async function fetchStLouis() {
+  const pdfUrl = 'https://slmpd.org/wp-content/uploads/httpdocs/CompStat/Compstat01A.PDF';
+  console.log('StLouis: fetching CompStat PDF...');
+  const resp = await fetchUrl(pdfUrl, 20000);
+  if (resp.status !== 200) throw new Error('StLouis: HTTP ' + resp.status);
+
+  const tokens = await extractPdfTokens(resp.body, 1);
+  const text = tokens.join(' ');
+
+  // Date: "to M/D/YYYY"
+  const dateMatch = text.match(/to\s+(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+  let asof = null;
+  if (dateMatch) {
+    asof = dateMatch[3] + '-' + String(parseInt(dateMatch[1])).padStart(2,'0') + '-' + String(parseInt(dateMatch[2])).padStart(2,'0');
+  }
+
+  // Find "Shooting Victims" row
+  const shootMatch = text.match(/Shooting\s*Victims?\s+([\d,]+)\s+([\d,]+)/i);
+  if (!shootMatch) throw new Error('StLouis: "Shooting Victims" not found. Tokens: ' + tokens.slice(0,60).join('|'));
+
+  const ytd = parseInt(shootMatch[1].replace(/,/g, ''));
+  const prior = parseInt(shootMatch[2].replace(/,/g, ''));
+  console.log('StLouis: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+  return { ytd, prior, asof };
+}
+
+// ─── Charlotte (ArcGIS monthly) ─────────────────────────────────────────────
+
+async function fetchCharlotte() {
+  const base = 'https://gis.charlottenc.gov/arcgis/rest/services/ODP/ViolentCrimeData/MapServer/0/query';
+  const CURRENT_YEAR = new Date().getFullYear();
+
+  const where = "ROW_TYPE = 'CMPD Jurisdiction' AND OFFENSE_DESCRIPTION = 'Non-Fatal Gunshot Injury'";
+  const url = base + '?where=' + encodeURIComponent(where) +
+    '&outFields=CALENDAR_YEAR,CALENDAR_MONTH,OFFENSE_COUNT&returnGeometry=false&resultRecordCount=2000&f=json';
+  const resp = await fetchUrl(url);
+  if (resp.status !== 200) throw new Error('Charlotte: HTTP ' + resp.status);
+  const data = JSON.parse(resp.body.toString('utf8'));
+  if (data.error) throw new Error('Charlotte: ' + (data.error.message || JSON.stringify(data.error).slice(0, 120)));
+  const rows = data.features || [];
+
+  // Find max month for current year
+  let maxMonth = 0;
+  rows.forEach(f => {
+    const a = f.attributes;
+    if (String(a.CALENDAR_YEAR) === String(CURRENT_YEAR) && parseInt(a.CALENDAR_MONTH) > maxMonth) {
+      maxMonth = parseInt(a.CALENDAR_MONTH);
+    }
+  });
+
+  function sumYear(year) {
+    let total = 0;
+    rows.forEach(f => {
+      const a = f.attributes;
+      if (String(a.CALENDAR_YEAR) === String(year) && parseInt(a.CALENDAR_MONTH) <= maxMonth) {
+        total += parseInt(a.OFFENSE_COUNT) || 0;
+      }
+    });
+    return total;
+  }
+
+  const ytd = sumYear(CURRENT_YEAR);
+  const prior = sumYear(CURRENT_YEAR - 1);
+  const asof = CURRENT_YEAR + '-' + String(maxMonth).padStart(2,'0') + '-28';
+
+  console.log('Charlotte: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof + ' (through month ' + maxMonth + ')');
+  return { ytd, prior, asof };
+}
+
+
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -1861,6 +2246,18 @@ async function main() {
 
     safe('LasVegas',   fetchVegas,      120000),
 
+    safe('Chicago',    fetchChicago,    60000),
+    safe('NYC',        fetchNYC,        60000),
+    safe('Baltimore',  fetchBaltimore,  60000),
+    safe('Boston',     fetchBoston,     60000),
+    safe('Louisville', fetchLouisville, 60000),
+    safe('Seattle',    fetchSeattle,    60000),
+    safe('Cincinnati', fetchCincinnati, 60000),
+    safe('StLouis',    fetchStLouis,    60000),
+    safe('NewOrleans', fetchNewOrleans, 60000),
+    safe('Charlotte',  fetchCharlotte,  60000),
+    safe('Rochester',  fetchRochester,  60000),
+
     // Omaha removed — Akamai blocks all automated access
   ]);
 
@@ -1897,6 +2294,31 @@ async function main() {
   console.log('\nWrote', outPath);
 
   console.log(JSON.stringify(results, null, 2));
+
+  // ── Append today's aggregate to trend.json ──
+  const trendPath = path.join(outDir, 'trend.json');
+  let trend = [];
+  try { trend = JSON.parse(fs.readFileSync(trendPath, 'utf8')); } catch(e) {}
+
+  let totalYtd = 0, totalPrior = 0, cityCount = 0;
+  for (const [, d] of Object.entries(results)) {
+    if (d.ok && typeof d.ytd === 'number' && typeof d.prior === 'number' && d.prior > 0) {
+      totalYtd += d.ytd;
+      totalPrior += d.prior;
+      cityCount++;
+    }
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const pctChange = totalPrior > 0 ? Math.round(((totalYtd - totalPrior) / totalPrior * 100) * 10) / 10 : null;
+
+  // Replace today's entry if it exists, otherwise append
+  const idx = trend.findIndex(t => t.date === today);
+  const entry = { date: today, ytd: totalYtd, prior: totalPrior, cities: cityCount, pct: pctChange };
+  if (idx >= 0) trend[idx] = entry; else trend.push(entry);
+  trend.sort((a, b) => a.date.localeCompare(b.date));
+
+  fs.writeFileSync(trendPath, JSON.stringify(trend, null, 2));
+  console.log('\nTrend: ' + today + ' ytd=' + totalYtd + ' prior=' + totalPrior + ' n=' + cityCount + ' pct=' + pctChange + '% (' + trend.length + ' total days)');
 
 }
 

@@ -501,24 +501,8 @@ var CITIES = [
     name: 'Chicago, IL',
     note: 'Shooting Victims (GUNSHOT_INJURY_I=YES)',
     dataUrl: 'https://data.cityofchicago.org/Public-Safety/Violence-Reduction-Victims-of-Homicides-and-Non-Fa/gumc-mgzr',
-    _url: 'https://data.cityofchicago.org/resource/gumc-mgzr.json',
-    count: async function(s, e) {
-      var where = "date >= '" + s + "T00:00:00.000' AND date <= '" + e + "T23:59:59.000' AND gunshot_injury_i = 'YES'";
-      var q = this._url + '?$where=' + encodeURIComponent(where) + '&$select=count(*)%20as%20n&$limit=1';
-      var r = await fetch(q, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      return parseInt(d[0] && d[0].n ? d[0].n : 0);
-    },
-    latest: async function() {
-      var q = this._url + '?$order=date%20DESC&$limit=1&$select=date&$where=' + encodeURIComponent("gunshot_injury_i = 'YES'");
-      try {
-        var r = await fetch(q, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        return d[0] && d[0].date ? d[0].date.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('chicago', 'chicago', s); },
+    latest: function() { return autoOrManualLatest('chicago', 'chicago'); }
   },
   {
     id: 'nyc',
@@ -526,55 +510,8 @@ var CITIES = [
     name: 'New York City, NY',
     note: 'Shooting Victims (NYPD CompStat PDF)',
     dataUrl: 'https://www.nyc.gov/site/nypd/stats/crime-statistics/citywide-crime-stats.page',
-    _pdfUrl: 'https://www.nyc.gov/assets/nypd/downloads/pdf/crime_statistics/cs-en-us-city.pdf',
-    _parsed: null,
-    _parse: async function() {
-      if (this._parsed) return this._parsed;
-      if (!window.pdfjsLib) {
-        await new Promise(function(resolve, reject) {
-          var s = document.createElement('script');
-          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-          s.onload = resolve; s.onerror = reject;
-          document.head.appendChild(s);
-        });
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      }
-      var resp = await fetch(this._pdfUrl + '?_t=' + Date.now(), { signal: AbortSignal.timeout(20000), cache: 'no-store' });
-      if (!resp.ok) throw new Error('PDF fetch HTTP ' + resp.status);
-      var buf = await resp.arrayBuffer();
-      var pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
-      var page = await pdf.getPage(1);
-      var tc = await page.getTextContent();
-      var tokens = tc.items.map(function(i) { return i.str.trim(); }).filter(function(s) { return s.length > 0; });
-      var text = tokens.join(' ');
-      var dateMatch = text.match(/(\d{1,2}\/\d{1,2}\/\d{4})\s+Through\s+(\d{1,2}\/\d{1,2}\/\d{4})/i);
-      if (!dateMatch) throw new Error('Could not find date range in PDF. Tokens: ' + tokens.slice(0,30).join('|'));
-      var asofRaw = dateMatch[2];
-      var aparts = asofRaw.split('/');
-      var asof = aparts[2] + '-' + aparts[0].padStart(2,'0') + '-' + aparts[1].padStart(2,'0');
-      var idx = tokens.findIndex(function(t) { return t.match(/shooting\s*vic/i); });
-      if (idx === -1) throw new Error('Could not find Shooting Vic row. Tokens: ' + tokens.slice(0,50).join('|'));
-      var nums = [];
-      for (var i = idx + 1; i < tokens.length && nums.length < 12; i++) {
-        if (tokens[i].match(/^-?[\d,]+\.?\d*$/)) nums.push(parseInt(tokens[i].replace(/,/g, '')));
-      }
-      if (nums.length < 9) throw new Error('Not enough numbers after Shooting Vic. Found: ' + nums.join(','));
-      var ytd   = nums[6];
-      var prior = nums[7];
-      this._parsed = { ytd: ytd, prior: prior, asof: asof };
-      return this._parsed;
-    },
-    count: async function(s, e) {
-      var p = await this._parse();
-      var windowYear = parseInt(s.slice(0, 4));
-      var asofYear   = parseInt(p.asof.slice(0, 4));
-      return windowYear === asofYear ? p.ytd : p.prior;
-    },
-    latest: async function() {
-      var p = await this._parse();
-      return p.asof;
-    }
+    count: function(s) { return autoOrManualCount('nyc', 'nyc', s); },
+    latest: function() { return autoOrManualLatest('nyc', 'nyc'); }
   },
   {
     id: 'philly',
@@ -591,35 +528,8 @@ var CITIES = [
     name: 'Baltimore, MD',
     note: 'Shooting Incidents (NIBRS, Shooting=Y)',
     dataUrl: 'https://data.baltimorecity.gov/',
-    _url: 'https://services1.arcgis.com/UWYHeuuJISiGmgXx/arcgis/rest/services/NIBRS_GroupA_Crime_Data/FeatureServer/0/query',
-    count: async function(s, e) {
-      var where = "Shooting = 'Y' AND CrimeDateTime >= DATE '" + s + "' AND CrimeDateTime <= DATE '" + e + "'";
-      var url = this._url + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
-      var r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 120));
-      return d.count;
-    },
-    latest: async function() {
-      var where = "Shooting = 'Y'";
-      var url = this._url + '?where=' + encodeURIComponent(where) +
-        '&outFields=CrimeDateTime&orderByFields=CrimeDateTime+DESC&resultRecordCount=1&f=json';
-      try {
-        var r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        if (d.error || !d.features || !d.features.length) return null;
-        var raw = d.features[0].attributes.CrimeDateTime;
-        if (typeof raw === 'number') {
-          var dt = new Date(raw);
-          var mm = String(dt.getMonth() + 1).padStart(2, '0');
-          var dd = String(dt.getDate()).padStart(2, '0');
-          return dt.getFullYear() + '-' + mm + '-' + dd;
-        }
-        return raw ? raw.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('baltimore', 'baltimore', s); },
+    latest: function() { return autoOrManualLatest('baltimore', 'baltimore'); }
   },
   {
     id: 'nashville',
@@ -636,37 +546,8 @@ var CITIES = [
     name: 'Boston, MA',
     note: 'Shooting Incidents (CSV)',
     dataUrl: 'https://data.boston.gov/dataset/shootings',
-    _csvUrl: 'https://data.boston.gov/datastore/dump/73c7e069-701f-4910-986d-b950f46c91a1?bom=True',
-    _cache: null,
-    _load: async function() {
-      if (this._cache) return this._cache;
-      var r = await fetch(this._csvUrl, { signal: AbortSignal.timeout(20000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var text = await r.text();
-      var lines = text.trim().split('\n');
-      var headers = lines[0].split(',').map(function(h) { return h.trim().replace(/^"|"$/g, ''); });
-      var dateIdx = headers.findIndex(function(h) { return h.toUpperCase() === 'SHOOTING_DATE'; });
-      if (dateIdx === -1) throw new Error('SHOOTING_DATE column not found. Headers: ' + headers.join(', '));
-      var dates = [];
-      for (var i = 1; i < lines.length; i++) {
-        var cols = lines[i].split(',');
-        var val = cols[dateIdx] ? cols[dateIdx].trim().replace(/^"|"$/g, '') : '';
-        if (val) dates.push(val.slice(0, 10));
-      }
-      this._cache = dates;
-      return dates;
-    },
-    count: async function(s, e) {
-      var dates = await this._load();
-      return dates.filter(function(d) { return d >= s && d <= e; }).length;
-    },
-    latest: async function() {
-      try {
-        var dates = await this._load();
-        if (!dates.length) return null;
-        return dates.slice().sort().pop();
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('boston', 'boston', s); },
+    latest: function() { return autoOrManualLatest('boston', 'boston'); }
   },
 
   {
@@ -675,36 +556,8 @@ var CITIES = [
     name: 'Louisville, KY',
     note: 'Gun Violence Victims (Non-Fatal + Homicide)',
     dataUrl: 'https://hub.arcgis.com/datasets/LOJIC::louisville-metro-ky-gun-violence-data/about',
-    _url: 'https://services1.arcgis.com/79kfd2K6fskCAkyg/arcgis/rest/services/Gun_Violence_Data/FeatureServer/0/query',
-    count: async function(s, e) {
-      var where = "(Crime_Type = 'Non-Fatal Shooting' OR Crime_Type = 'Homicide')" +
-        " AND DateTime >= '" + s + " 00:00:00' AND DateTime <= '" + e + " 23:59:59'";
-      var url = this._url + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
-      var r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 120));
-      return d.count;
-    },
-    latest: async function() {
-      var where = "Crime_Type = 'Non-Fatal Shooting' OR Crime_Type = 'Homicide'";
-      var url = this._url + '?where=' + encodeURIComponent(where) +
-        '&outFields=DateTime&orderByFields=DateTime+DESC&resultRecordCount=1&f=json';
-      try {
-        var r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        if (d.error || !d.features || !d.features.length) return null;
-        var raw = d.features[0].attributes.DateTime;
-        if (typeof raw === 'number') {
-          var dt = new Date(raw);
-          var mm = String(dt.getMonth() + 1).padStart(2, '0');
-          var dd = String(dt.getDate()).padStart(2, '0');
-          return dt.getFullYear() + '-' + mm + '-' + dd;
-        }
-        return raw ? raw.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('louisville', 'louisville', s); },
+    latest: function() { return autoOrManualLatest('louisville', 'louisville'); }
   },
   {
     id: 'seattle',
@@ -712,19 +565,8 @@ var CITIES = [
     note: 'Shooting Incidents — Fatal + Non-Fatal (Socrata)',
     type: 'Incidents',
     dataUrl: 'https://data.seattle.gov/Public-Safety/SPD-Crime-Data-2008-Present/tazs-3rd5',
-    _url: 'https://data.seattle.gov/resource/tazs-3rd5.json',
-    _shootingWhere: "(shooting_type_group = 'Shooting (Fatal Injury)' OR shooting_type_group = 'Shooting (Non-Fatal Injury)') AND nibrs_crime_against_category = 'PERSON'",
-    count: async function(s, e) {
-      var where = this._shootingWhere + " AND offense_date >= '" + s + "T00:00:00' AND offense_date <= '" + e + "T23:59:59'";
-      var q = this._url + '?$where=' + encodeURIComponent(where) + '&$select=count(DISTINCT%20report_number)%20as%20n&$limit=1';
-      var r = await fetch(q, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      return parseInt(d[0] && d[0].n ? d[0].n : 0);
-    },
-    latest: async function() {
-      return socrataLatest(this._url, 'offense_date', this._shootingWhere);
-    }
+    count: function(s) { return autoOrManualCount('seattle', 'seattle', s); },
+    latest: function() { return autoOrManualLatest('seattle', 'seattle'); }
   },
 
 
@@ -735,31 +577,14 @@ var CITIES = [
 
 
 
-{
+  {
     id: 'cincinnati',
     type: 'Victims',
     name: 'Cincinnati, OH',
     note: 'Shooting Victims (Socrata)',
     dataUrl: 'https://data.cincinnati-oh.gov/safety/PDI-Police-Data-Initiative-Crime-Incidents/k59e-2pvf',
-    _url: 'https://data.cincinnati-oh.gov/resource/sfea-4ksu.json',
-    _fmt: function(d) { return d.replace(/-/g, ''); }, // YYYY-MM-DD -> YYYYMMDD
-    count: async function(s, e) {
-      return socrataCount(this._url,
-        "`dateoccurred` >= '" + this._fmt(s) + "' AND `dateoccurred` <= '" + this._fmt(e) + "'");
-    },
-    latest: async function() {
-      var q = this._url + '?$order=dateoccurred%20DESC&$limit=1&$select=dateoccurred';
-      try {
-        var r = await fetch(q, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        var raw = d[0] && d[0].dateoccurred ? d[0].dateoccurred : null;
-        if (!raw) return null;
-        // Handle both YYYYMMDD and already-formatted dates
-        if (raw.length === 8) return raw.slice(0,4) + '-' + raw.slice(4,6) + '-' + raw.slice(6,8);
-        return raw.slice(0, 10);
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('cincinnati', 'cincinnati', s); },
+    latest: function() { return autoOrManualLatest('cincinnati', 'cincinnati'); }
   },
   {
     id: 'stlouis',
@@ -767,68 +592,8 @@ var CITIES = [
     note: 'Shooting Victims (CompStat PDF)',
     type: 'Victims',
     dataUrl: 'https://slmpd.org/wp-content/uploads/httpdocs/CompStat/Compstat01A.PDF',
-    _pdfUrl: 'https://slmpd.org/wp-content/uploads/httpdocs/CompStat/Compstat01A.PDF',
-    _parsed: null,
-    _parse: async function() {
-      if (this._parsed) return this._parsed;
-      if (!window.pdfjsLib) {
-        await new Promise(function(resolve, reject) {
-          var s = document.createElement('script');
-          s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-          s.onload = resolve; s.onerror = reject;
-          document.head.appendChild(s);
-        });
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
-          'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-      }
-      var resp = await fetch(this._pdfUrl + '?_t=' + Date.now(), { signal: AbortSignal.timeout(20000), cache: 'no-store' });
-      if (!resp.ok) throw new Error('PDF fetch HTTP ' + resp.status);
-      var buf = await resp.arrayBuffer();
-      var pdf = await window.pdfjsLib.getDocument({ data: buf }).promise;
-      var page = await pdf.getPage(1);
-      var tc = await page.getTextContent();
-      var tokens = tc.items.map(function(i) { return i.str.trim(); }).filter(function(s) { return s.length > 0; });
-      var text = tokens.join(' ');
-
-      // Date: "2/2/2026 12:00:00 AM to 2/8/2026" — take last M/D/YYYY before next word
-      var dateMatch = text.match(/to\s+(\d{1,2}\/\d{1,2}\/\d{4})/i);
-      if (!dateMatch) throw new Error('Could not find end date. Tokens: ' + tokens.slice(0,40).join('|'));
-      var aparts = dateMatch[1].split('/');
-      var asof = aparts[2] + '-' + aparts[0].padStart(2,'0') + '-' + aparts[1].padStart(2,'0');
-
-      // Find SHOOTING VICTIMS row
-      var idx = tokens.findIndex(function(t) { return t.match(/^SHOOTING\s+VICTIMS$/i); });
-      if (idx === -1) {
-        // Try split across two tokens
-        idx = tokens.findIndex(function(t, i) {
-          return t.match(/^SHOOTING$/i) && tokens[i+1] && tokens[i+1].match(/^VICTIMS$/i);
-        });
-        // No index adjustment needed — "VICTIMS" at idx+1 is non-numeric and gets skipped by the loop below
-      }
-      if (idx === -1) throw new Error('Could not find SHOOTING VICTIMS row. Tokens: ' + tokens.slice(0,60).join('|'));
-
-      // Grab numeric tokens after label (% tokens filtered out): [7d_cur, 7d_prior, 28d_cur, 28d_prior, ytd_cur, ytd_prior, ...]
-      var nums = [];
-      for (var i = idx + 1; i < tokens.length && nums.length < 12; i++) {
-        if (tokens[i].match(/^-?[\d,]+\.?\d*$/) && !tokens[i].match(/^-?\d+%$/)) {
-          nums.push(parseInt(tokens[i].replace(/,/g, '')));
-        }
-      }
-      if (nums.length < 9) throw new Error('Not enough numbers after SHOOTING VICTIMS. Found: ' + nums.join(','));
-
-      this._parsed = { ytd: nums[4], prior: nums[5], asof: asof };
-      return this._parsed;
-    },
-    count: async function(s, e) {
-      var p = await this._parse();
-      var windowYear = parseInt(s.slice(0, 4));
-      var asofYear   = parseInt(p.asof.slice(0, 4));
-      return windowYear === asofYear ? p.ytd : p.prior;
-    },
-    latest: async function() {
-      var p = await this._parse();
-      return p.asof;
-    }
+    count: function(s) { return autoOrManualCount('stlouis', 'stlouis', s); },
+    latest: function() { return autoOrManualLatest('stlouis', 'stlouis'); }
   },
   {
     id: 'detroit',
@@ -854,43 +619,8 @@ var CITIES = [
     note: 'Shooting Incidents (CFS, 30S/34S RTF)',
     type: 'Incidents',
     dataUrl: 'https://data.nola.gov/Public-Safety-and-Preparedness/Calls-for-Service-2026/es9j-6y5d',
-    _datasets: {
-      '2026': 'https://data.nola.gov/resource/es9j-6y5d.json',
-      '2025': 'https://data.nola.gov/resource/4xwx-sfte.json'
-    },
-    _getUrl: function(year) {
-      // Fall back to most recent known dataset, not a fixed year
-      var y = String(year);
-      if (this._datasets[y]) return this._datasets[y];
-      var keys = Object.keys(this._datasets).sort();
-      return this._datasets[keys[keys.length - 1]];
-    },
-    count: async function(s, e) {
-      var year = s.slice(0, 4);
-      var base = this._getUrl(year);
-      var where = "(type_ = '30S' OR type_ = '34S') AND disposition = 'RTF'" +
-        " AND timecreate >= '" + s + "T00:00:00.000' AND timecreate <= '" + e + "T23:59:59.000'";
-      var url = base + '?$where=' + encodeURIComponent(where) + '&$select=count(*)+as+n&$limit=1';
-      var r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 120));
-      return parseInt(d[0].n);
-    },
-    latest: async function() {
-      var year = new Date().getFullYear();
-      var base = this._getUrl(year);
-      var where = "type_ = '30S' OR type_ = '34S'";
-      var url = base + '?$where=' + encodeURIComponent(where) +
-        '&$order=timecreate+DESC&$limit=1&$select=timecreate';
-      try {
-        var r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        if (!d.length) return null;
-        return d[0].timecreate ? d[0].timecreate.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('neworleans', 'neworleans', s); },
+    latest: function() { return autoOrManualLatest('neworleans', 'neworleans'); }
   },
   {
     id: 'portland',
@@ -1008,68 +738,8 @@ var CITIES = [
     note: 'Non-Fatal Gunshot Injury (CMPD Jurisdiction)',
     type: 'Non-Fatal',
     dataUrl: 'https://data.charlottenc.gov/datasets/charlotte::cmpd-violent-crime/explore',
-    _url: 'https://gis.charlottenc.gov/arcgis/rest/services/ODP/ViolentCrimeData/MapServer/0/query',
-    _cache: null,
-    _loadData: async function() {
-      if (this._cache) return this._cache;
-      // Query Total Type rows for Non-Fatal Gunshot Injury in CMPD Jurisdiction
-      var where = "ROW_TYPE = 'CMPD Jurisdiction' AND OFFENSE_DESCRIPTION = 'Non-Fatal Gunshot Injury'";
-      var url = this._url + '?where=' + encodeURIComponent(where) +
-        '&outFields=CALENDAR_YEAR,CALENDAR_MONTH,OFFENSE_COUNT,GEOGRAPHY&returnGeometry=false&resultRecordCount=2000&f=json';
-      var r = await fetch(url, { signal: AbortSignal.timeout(20000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 200));
-      this._cache = d.features || [];
-      if (this._cache.length > 0) {
-        console.log('Charlotte sample:', JSON.stringify(this._cache[0].attributes));
-      }
-      return this._cache;
-    },
-    count: async function(s, e) {
-      var rows = await this._loadData();
-      var year = s.slice(0, 4); // CALENDAR_YEAR is a string
-      // Find the max month available for the CURRENT year to ensure fair comparison
-      var maxMonth = 0;
-      rows.forEach(function(f) {
-        var a = f.attributes;
-        if (a.CALENDAR_YEAR == String(CURRENT_YEAR)) {
-          var m = parseInt(a.CALENDAR_MONTH) || 0;
-          if (m > maxMonth) maxMonth = m;
-        }
-      });
-      // Sum counts for requested year, only up to the max available month
-      var total = 0, found = false;
-      rows.forEach(function(f) {
-        var a = f.attributes;
-        if (a.CALENDAR_YEAR != year) return;
-        var m = parseInt(a.CALENDAR_MONTH) || 0;
-        if (maxMonth > 0 && m > maxMonth) return;
-        var count = a.OFFENSE_COUNT || 0;
-        total += count; found = true;
-      });
-      return found ? total : null;
-    },
-    latest: async function() {
-      var rows = await this._loadData();
-      var latestDate = null;
-      rows.forEach(function(f) {
-        var a = f.attributes;
-        var y = a.CALENDAR_YEAR;
-        var m = a.CALENDAR_MONTH;
-        if (y && m) {
-          var d = y + '-' + String(m).padStart(2, '0') + '-01';
-          if (!latestDate || d > latestDate) latestDate = d;
-        }
-      });
-      // Return last day of the latest month
-      if (latestDate) {
-        var parts = latestDate.split('-');
-        var lastDay = new Date(parseInt(parts[0]), parseInt(parts[1]), 0).getDate();
-        return parts[0] + '-' + parts[1] + '-' + String(lastDay).padStart(2, '0');
-      }
-      return null;
-    }
+    count: function(s) { return autoOrManualCount('charlotte', 'charlotte', s); },
+    latest: function() { return autoOrManualLatest('charlotte', 'charlotte'); }
   },
   {
     id: 'denver',
@@ -1104,33 +774,8 @@ var CITIES = [
     name: 'Rochester, NY',
     note: 'Shooting Victims (ArcGIS Open Data)',
     dataUrl: 'https://data-rpdny.opendata.arcgis.com/datasets/rochester-ny-shooting-victims',
-    _url: 'https://services7.arcgis.com/wMvCpnbQEKXZsPSQ/arcgis/rest/services/Rochester_NY_Shooting_Victims/FeatureServer/0/query',
-    count: async function(s, e) {
-      var where = "Occurred_Date >= DATE '" + s + "' AND Occurred_Date <= DATE '" + e + "'";
-      var url = this._url + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
-      var r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 120));
-      return d.count;
-    },
-    latest: async function() {
-      var url = this._url + '?where=1%3D1&outFields=Occurred_Date&orderByFields=Occurred_Date+DESC&resultRecordCount=1&f=json';
-      try {
-        var r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        if (d.error || !d.features || !d.features.length) return null;
-        var raw = d.features[0].attributes.Occurred_Date;
-        if (typeof raw === 'number') {
-          var dt = new Date(raw);
-          var mm = String(dt.getMonth() + 1).padStart(2, '0');
-          var dd = String(dt.getDate()).padStart(2, '0');
-          return dt.getFullYear() + '-' + mm + '-' + dd;
-        }
-        return raw ? raw.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    count: function(s) { return autoOrManualCount('rochester', 'rochester', s); },
+    latest: function() { return autoOrManualLatest('rochester', 'rochester'); }
   }
 ];
 
@@ -1209,16 +854,6 @@ async function fetchAll() {
 
   document.getElementById('exportBtn').disabled = true;
   document.getElementById('jpegBtn').disabled = true;
-
-  // Reset NYC PDF cache on each refresh
-  var nycCity = CITIES.find(function(c) { return c.id === 'nyc'; });
-  if (nycCity) nycCity._parsed = null;
-  // Reset St. Louis PDF cache on each refresh
-  var stlCity = CITIES.find(function(c) { return c.id === 'stlouis'; });
-  if (stlCity) stlCity._parsed = null;
-  // Reset Charlotte ArcGIS cache on each refresh
-  var cltCity = CITIES.find(function(c) { return c.id === 'charlotte'; });
-  if (cltCity) cltCity._cache = null;
 
   state = {};
   CITIES.forEach(function(c) { state[c.id] = { status: 'loading' }; });
@@ -1646,13 +1281,13 @@ function exportCSV() {
     if (!resp.ok) return;
     var raw = await resp.json();
     var data = raw.filter(function(d) { return d.pct !== null; });
-    if (data.length < 3) return;
+    if (data.length < 14) return; // Show after ~2 weeks of data
 
     document.getElementById('trendCard').style.display = '';
     var first = data[0].date, last = data[data.length - 1].date;
     document.getElementById('trendSub').textContent =
       first.replace(/-/g, '/').slice(5) + ' – ' + last.replace(/-/g, '/').slice(5) +
-      '  ·  ' + data.length + ' DAYS  ·  SERVER-TRACKED SAMPLE';
+      '  ·  ' + data.length + ' DAYS';
 
     var canvas = document.getElementById('trendCanvas');
     var dpr = window.devicePixelRatio || 1;
@@ -1720,7 +1355,7 @@ function exportCSV() {
     }
 
     // Line
-    ctx.strokeStyle = '#1a3a5c';
+    ctx.strokeStyle = '#2c6fbb';
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.beginPath();
@@ -1732,12 +1367,33 @@ function exportCSV() {
 
     // End dot + label
     var lastX = xPos(data.length - 1), lastY = yPos(data[data.length - 1].pct);
-    ctx.fillStyle = '#1a3a5c';
+    ctx.fillStyle = '#2c6fbb';
     ctx.beginPath(); ctx.arc(lastX, lastY, 3.5, 0, Math.PI * 2); ctx.fill();
     ctx.font = 'bold 11px "JetBrains Mono", monospace';
     ctx.textAlign = 'right';
-    ctx.textBaseline = 'bottom';
-    ctx.fillText(data[data.length - 1].pct + '%', lastX - 6, lastY - 4);
+    ctx.textBaseline = 'top';
+    ctx.fillText(data[data.length - 1].pct + '%', lastX - 6, lastY + 6);
+
+    // Tooltip on hover
+    var tooltip = document.createElement('div');
+    tooltip.style.cssText = 'position:absolute;display:none;background:#1e2a35;color:#fff;font:11px "JetBrains Mono",monospace;padding:4px 8px;pointer-events:none;white-space:nowrap;z-index:10';
+    canvas.parentElement.style.position = 'relative';
+    canvas.parentElement.appendChild(tooltip);
+
+    canvas.addEventListener('mousemove', function(ev) {
+      var cr = canvas.getBoundingClientRect();
+      var mx = ev.clientX - cr.left;
+      var idx = Math.round((mx - padL) / plotW * (data.length - 1));
+      if (idx < 0 || idx >= data.length) { tooltip.style.display = 'none'; return; }
+      var d = data[idx];
+      tooltip.textContent = d.date + '  ' + d.pct + '%';
+      tooltip.style.display = 'block';
+      var tx = xPos(idx);
+      var ty = yPos(d.pct);
+      tooltip.style.left = Math.min(tx, W - 140) + 'px';
+      tooltip.style.top = (ty - 28) + 'px';
+    });
+    canvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
 
   } catch(e) { /* trend chart is optional — fail silently */ }
 })();
