@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>City Shooting Data Tracker</title>
+<link rel="icon" type="image/png" href="favicon.png">
 <script defer src="https://ahd-analytics.vercel.app/tracker.js" data-site="shooting"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -906,38 +907,11 @@ var CITIES = [
   {
     id: 'lasvegas',
     name: 'Las Vegas, NV',
-    note: 'Shooting Victims (NIBRS, ShootingVictims=Y)',
+    note: 'Shooting Victims (Weekly Crime Report PDF)',
     type: 'Victims',
-    dataUrl: 'https://opendata-lvmpd.hub.arcgis.com/search?tags=person%2520crime',
-    _url: 'https://services.arcgis.com/jjSk6t82vIntwDbs/arcgis/rest/services/LVMPD_Weekly_NIBRS_Crimes/FeatureServer/0/query',
-    count: async function(s, e) {
-      var where = "ShootingVictims = 'Y' AND ReportedOn >= '" + s + " 00:00:00' AND ReportedOn <= '" + e + " 23:59:59'";
-      var url = this._url + '?where=' + encodeURIComponent(where) + '&returnCountOnly=true&f=json';
-      var r = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      var d = await r.json();
-      if (d.error) throw new Error(d.error.message || JSON.stringify(d.error).slice(0, 120));
-      return d.count;
-    },
-    latest: async function() {
-      var where = "ShootingVictims = 'Y'";
-      var url = this._url + '?where=' + encodeURIComponent(where) +
-        '&outFields=ReportedOn&orderByFields=ReportedOn+DESC&resultRecordCount=1&f=json';
-      try {
-        var r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-        if (!r.ok) return null;
-        var d = await r.json();
-        if (d.error || !d.features || !d.features.length) return null;
-        var raw = d.features[0].attributes.ReportedOn;
-        if (typeof raw === 'number') {
-          var dt = new Date(raw);
-          var mm = String(dt.getMonth() + 1).padStart(2, '0');
-          var dd = String(dt.getDate()).padStart(2, '0');
-          return dt.getFullYear() + '-' + mm + '-' + dd;
-        }
-        return raw ? raw.slice(0, 10) : null;
-      } catch(e) { return null; }
-    }
+    dataUrl: 'https://www.lvmpd.com/about/transparency/statistics',
+    count: function(s) { return autoOrManualCount('lasvegas', 'lasvegas', s); },
+    latest: function() { return autoOrManualLatest('lasvegas', 'lasvegas'); }
   },
   {
     id: 'miamidade',

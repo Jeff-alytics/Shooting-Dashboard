@@ -1429,6 +1429,166 @@ async function fetchMiamiDade() {
 
 
 
+// ─── Las Vegas (LVMPD Weekly Crime Report PDF) ──────────────────────────────
+
+async function fetchVegas() {
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--disable-blink-features=AutomationControlled']
+  });
+
+  try {
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      viewport: { width: 1920, height: 1080 },
+      acceptDownloads: true
+    });
+    const page = await context.newPage();
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+
+    console.log('Vegas: navigating to statistics page...');
+    await page.goto('https://www.lvmpd.com/about/transparency/statistics', {
+      waitUntil: 'networkidle', timeout: 30000
+    });
+
+    // Find the crime report PDF link
+    const pdfLink = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href]'));
+      for (const a of links) {
+        const text = a.textContent.toLowerCase();
+        const href = a.href.toLowerCase();
+        if ((text.includes('crime report') || text.includes('weekly crime')) &&
+            (href.includes('.pdf') || text.includes('pdf'))) {
+          return a.href;
+        }
+      }
+      // Fallback: any PDF link with 'crime' in text or URL
+      for (const a of links) {
+        const text = a.textContent.toLowerCase();
+        const href = a.href.toLowerCase();
+        if (href.includes('.pdf') && (text.includes('crime') || href.includes('crime'))) {
+          return a.href;
+        }
+      }
+      return null;
+    });
+
+    if (!pdfLink) {
+      // Log all links for debugging
+      const allLinks = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('a[href]'))
+          .map(a => ({ href: a.href, text: a.textContent.trim().substring(0, 80) }))
+          .filter(l => l.href.includes('.pdf') || l.text.toLowerCase().includes('report'))
+      );
+      console.log('Vegas: no crime report PDF found. Links:', JSON.stringify(allLinks));
+      throw new Error('Vegas: could not find crime report PDF link on statistics page');
+    }
+
+    console.log('Vegas: downloading PDF from', pdfLink);
+
+    // Download the PDF
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 30000 }),
+      page.goto(pdfLink, { waitUntil: 'commit', timeout: 30000 }).catch(() => {})
+    ]);
+    const downloadPath = await download.path();
+    if (!downloadPath) throw new Error('Vegas: PDF download path null');
+    const pdfBuffer = require('fs').readFileSync(downloadPath);
+
+    if (pdfBuffer.length < 5000 || pdfBuffer[0] !== 0x25) {
+      throw new Error('Vegas: downloaded file is not a valid PDF (' + pdfBuffer.length + ' bytes)');
+    }
+    console.log('Vegas: PDF downloaded (' + (pdfBuffer.length / 1024).toFixed(0) + ' KB)');
+
+    await browser.close();
+
+    // Parse page 2 for shooting victims
+    const tokens = await extractPdfTokens(pdfBuffer, 2);
+    const joined = tokens.join(' ');
+    console.log('Vegas: page 2 tokens (first 500):', joined.substring(0, 500));
+
+    // Look for "Shooting Victims" row — extract YTD and prior year numbers
+    // Typical format: "Shooting Victims  <weekly> <ytd_current> <ytd_prior> ..."
+    const shootingMatch = joined.match(/Shooting\s*Victims?[\s\S]*?(?=\n|Robbery|Domestic|Sexual|Homicide|Auto|Vehicle|Total|$)/i);
+    if (!shootingMatch) throw new Error('Vegas: "Shooting Victims" not found on page 2. Tokens: ' + tokens.slice(0, 80).join('|'));
+
+    const afterLabel = shootingMatch[0].replace(/Shooting\s*Victims?/i, '').trim();
+    const nums = [];
+    const numMatches = afterLabel.matchAll(/-?[\d,]+/g);
+    for (const m of numMatches) {
+      const n = parseInt(m[0].replace(/,/g, ''));
+      if (!isNaN(n)) nums.push(n);
+    }
+
+    console.log('Vegas: extracted numbers after "Shooting Victims":', nums);
+
+    if (nums.length < 2) throw new Error('Vegas: not enough numbers after Shooting Victims: ' + nums.join(','));
+
+    // The weekly crime report typically shows columns like:
+    // Crime | This Week | Last Week | Weekly Change | YTD Current | YTD Prior | YTD Change
+    // We need YTD Current and YTD Prior — usually the larger numbers after the weekly ones
+    // Strategy: if we find >=4 numbers, take indices 3,4 (YTD cols after weekly cols)
+    // If only 2-3, take last two as YTD current and prior
+    let ytd, prior;
+    if (nums.length >= 5) {
+      // Columns: ThisWeek, LastWeek, Change, YTD_Current, YTD_Prior, [YTD_Change]
+      ytd = nums[3];
+      prior = nums[4];
+    } else if (nums.length >= 4) {
+      ytd = nums[2];
+      prior = nums[3];
+    } else {
+      ytd = nums[0];
+      prior = nums[1];
+    }
+
+    // Sanity check — YTD should be larger than weekly
+    if (ytd < 5 || prior < 5) {
+      console.log('Vegas: warning — values seem too low, trying alternative column positions');
+      // Try last two numbers
+      ytd = nums[nums.length - 2];
+      prior = nums[nums.length - 1];
+    }
+
+    // Extract "week ending" date from PDF text for asof
+    const page1Tokens = await extractPdfTokens(pdfBuffer, 1);
+    const page1Text = page1Tokens.join(' ');
+    let asof = null;
+    const dateMatch = page1Text.match(/[Ww]eek\s+[Ee]nding\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
+    if (dateMatch) {
+      const months = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+      const mo = months[dateMatch[1].toLowerCase()];
+      if (mo) asof = dateMatch[3] + '-' + String(mo).padStart(2,'0') + '-' + String(parseInt(dateMatch[2])).padStart(2,'0');
+    }
+    if (!asof) {
+      // Try page 2
+      const dateMatch2 = joined.match(/[Ww]eek\s+[Ee]nding\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})/);
+      if (dateMatch2) {
+        const months = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+        const mo = months[dateMatch2[1].toLowerCase()];
+        if (mo) asof = dateMatch2[3] + '-' + String(mo).padStart(2,'0') + '-' + String(parseInt(dateMatch2[2])).padStart(2,'0');
+      }
+    }
+    if (!asof) {
+      // Fallback: use today minus 3 days
+      const d = new Date(); d.setDate(d.getDate() - 3);
+      asof = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    }
+
+    console.log('Vegas: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
+    return { ytd, prior, asof };
+
+  } catch(e) {
+    await browser.close().catch(() => {});
+    throw e;
+  }
+}
+
+
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -1698,6 +1858,8 @@ async function main() {
     safe('Portsmouth',  fetchPortsmouth,  120000),
 
     safe('Wilmington',  fetchWilmington,  120000),
+
+    safe('LasVegas',   fetchVegas,      120000),
 
     // Omaha removed — Akamai blocks all automated access
   ]);
