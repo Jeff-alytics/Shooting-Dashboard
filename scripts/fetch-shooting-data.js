@@ -1919,12 +1919,13 @@ async function fetchStLouis() {
     asof = dateMatch[3] + '-' + String(parseInt(dateMatch[1])).padStart(2,'0') + '-' + String(parseInt(dateMatch[2])).padStart(2,'0');
   }
 
-  // Find "Shooting Victims" row
-  const shootMatch = text.match(/Shooting\s*Victims?\s+([\d,]+)\s+([\d,]+)/i);
+  // Find "Shooting Victims" row — columns are: 7-day(2026,2025,%chg), 28-day(2026,2025,%chg), YTD(2026,2025,%chg)
+  // We need the YTD pair (5th and 6th numbers after the label)
+  const shootMatch = text.match(/Shooting\s*Victims?\s+([\d,]+)\s+([\d,]+)\s+[-\d]+%\s+([\d,]+)\s+([\d,]+)\s+[-\d]+%\s+([\d,]+)\s+([\d,]+)/i);
   if (!shootMatch) throw new Error('StLouis: "Shooting Victims" not found. Tokens: ' + tokens.slice(0,60).join('|'));
 
-  const ytd = parseInt(shootMatch[1].replace(/,/g, ''));
-  const prior = parseInt(shootMatch[2].replace(/,/g, ''));
+  const ytd = parseInt(shootMatch[5].replace(/,/g, ''));
+  const prior = parseInt(shootMatch[6].replace(/,/g, ''));
   console.log('StLouis: ytd=' + ytd + ' prior=' + prior + ' asof=' + asof);
   return { ytd, prior, asof };
 }
